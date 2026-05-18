@@ -1,0 +1,5 @@
+# Global owners — all files require at least one CloudSmith maintainer review
+* @cloudsmith-cloud/maintainers
+
+# CI/CD files always require platform-eng review
+/.github/ @cloudsmith-cloud/platform-eng
