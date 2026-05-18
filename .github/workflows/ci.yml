@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+jobs:
+  dco:
+    if: github.event_name == 'pull_request'
+    uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/dco-check.yml@v1.0.0
+  build-test:
+    uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/dotnet-build-test.yml@v1.0.0
+    with:
+      run-integration-tests: true
+    secrets: inherit
+  docker:
+    if: github.ref == 'refs/heads/main'
+    needs: [build-test]
+    uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/docker-build-push.yml@v1.0.0
+    with:
+      image-name: 'cloudsmith-api'
+    secrets: inherit
+  trivy:
+    if: github.ref == 'refs/heads/main'
+    needs: [docker]
+    uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/trivy-scan.yml@v1.0.0
+    with:
+      image-ref: 'ghcr.io/cloudsmith-cloud/cloudsmith-api:latest'
+    secrets: inherit
