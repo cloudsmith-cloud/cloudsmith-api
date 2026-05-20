@@ -4,7 +4,8 @@ COPY nuget.config .
 COPY src/CloudSmith.Api/CloudSmith.Api.csproj src/CloudSmith.Api/
 COPY src/CloudSmith.Api.Tests/CloudSmith.Api.Tests.csproj src/CloudSmith.Api.Tests/
 RUN --mount=type=secret,id=nuget_token \
-    NuGetPackageSourceCredentials_cloudsmith-github="Username=x-access-token;Password=$(cat /run/secrets/nuget_token)" \
+    TOKEN=$(cat /run/secrets/nuget_token) && \
+    dotnet nuget update source cloudsmith-github --username x-access-token --password "$TOKEN" --store-password-in-clear-text --configfile nuget.config && \
     dotnet restore src/CloudSmith.Api/CloudSmith.Api.csproj
 COPY . .
 RUN dotnet publish src/CloudSmith.Api/CloudSmith.Api.csproj -c Release -o /app/publish --no-restore
