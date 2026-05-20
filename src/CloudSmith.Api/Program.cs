@@ -3,6 +3,7 @@
 
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Endpoints;
+using Microsoft.AspNetCore.HttpOverrides;
 using CloudSmith.ClusterMgmt;
 using CloudSmith.ClusterMgmt.Services;
 using CloudSmith.Core.Hosting;
@@ -66,6 +67,12 @@ var app = builder.Build();
 // Run all module migrations on startup using isolated scopes to avoid FM runner conflicts
 app.Services.MigrateCloudSmithDatabase();
 MigrateAllDatabases(connectionString);
+
+// Trust X-Forwarded-* headers from nginx reverse proxy
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost
+});
 
 // Middleware (auth must come after routing, before endpoints)
 app.UseMiddleware<CorrelationIdMiddleware>();
