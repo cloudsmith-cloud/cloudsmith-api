@@ -104,6 +104,9 @@ static void MigrateAllDatabases(string connectionString)
 
 static void RunMigrations(string connectionString, System.Reflection.Assembly migrationsAssembly)
 {
+    // Standalone provider intentionally isolated from the app container so each module's
+    // FluentMigrator runner resolves against the correct migrations assembly.
+#pragma warning disable ASP0000
     var services = new ServiceCollection()
         .AddFluentMigratorCore()
         .ConfigureRunner(rb => rb
@@ -112,6 +115,7 @@ static void RunMigrations(string connectionString, System.Reflection.Assembly mi
             .ScanIn(migrationsAssembly).For.Migrations())
         .AddLogging(lb => lb.AddFluentMigratorConsole())
         .BuildServiceProvider();
+#pragma warning restore ASP0000
 
     using var scope = services.CreateScope();
     scope.ServiceProvider.GetRequiredService<IMigrationRunner>().MigrateUp();
