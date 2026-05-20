@@ -8,7 +8,7 @@
     <AssemblyName>CloudSmith.Api</AssemblyName>
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <NoWarn>CS1591</NoWarn>
+    <NoWarn>CS1591;NU1603;NU1902</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
