@@ -22,7 +22,7 @@ public static class ConfigEndpoints
             var vars = await svc.ListVariablesAsync(module, ct);
             return Results.Ok(vars);
         })
-        .RequireAuthorization(new RequirePermissionAttribute("config:read"))
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("config:read")))
         .WithSummary("List registered configuration variables");
 
         // GET /api/v1/config/values/{scopeId}/{key}
@@ -39,7 +39,7 @@ public static class ConfigEndpoints
 
             return value is null ? Results.NotFound() : Results.Ok(value);
         })
-        .RequireAuthorization(new RequirePermissionAttribute("config:read"))
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("config:read")))
         .WithSummary("Get a configuration value at a scope (effective = ancestor-chain resolved)");
 
         // PUT /api/v1/config/values/{scopeId}/{key}
@@ -53,7 +53,7 @@ public static class ConfigEndpoints
             await svc.SetValueAsync(scopeId, key, body.Value, body.IsSecret, ct);
             return Results.NoContent();
         })
-        .RequireAuthorization(new RequirePermissionAttribute("config:write"))
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("config:write")))
         .WithSummary("Set a configuration value at a specific scope");
 
         // DELETE /api/v1/config/values/{scopeId}/{key}
@@ -66,7 +66,7 @@ public static class ConfigEndpoints
             await svc.DeleteValueAsync(scopeId, key, ct);
             return Results.NoContent();
         })
-        .RequireAuthorization(new RequirePermissionAttribute("config:write"))
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("config:write")))
         .WithSummary("Delete a configuration value at a specific scope (falls back to ancestor)");
 
         // GET /api/v1/config/snapshot/{scopeId}
@@ -80,7 +80,7 @@ public static class ConfigEndpoints
             var snapshot = await svc.GetSnapshotAsync(scopeId, label ?? "manual", snapshotId, ct);
             return Results.Ok(snapshot);
         })
-        .RequireAuthorization(new RequirePermissionAttribute("config:read"))
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("config:read")))
         .WithSummary("Get or create a configuration snapshot at a scope");
 
         return app;

@@ -25,8 +25,9 @@ public sealed class PermissionAuthorizationHandler : AuthorizationHandler<Permis
         var userId = http.GetUserId();
         if (orgId == null || userId == null) return;
 
-        var ctx    = new AuthorizationContext(userId.Value, orgId.Value, http.GetSiteId(), http.GetClusterId());
-        var allowed = await _authz.HasPermissionAsync(ctx, requirement.Permission);
+        var ctx     = new AuthorizationContext(http.GetSiteId()?.ToString(), http.GetClusterId()?.ToString());
+        var allowed = await _authz.AuthorizeAsync(
+            orgId.Value.ToString(), userId.Value.ToString(), requirement.Permission, ctx, http.RequestAborted);
 
         if (allowed)
             context.Succeed(requirement);
