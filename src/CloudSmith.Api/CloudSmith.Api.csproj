@@ -16,7 +16,7 @@
     <PackageReference Include="CloudSmith.Core" Version="0.1.0" />
     <PackageReference Include="CloudSmith.Identity" Version="0.1.0" />
     <PackageReference Include="CloudSmith.ClusterMgmt" Version="0.1.0" />
-    <PackageReference Include="CloudSmith.Inventory" Version="0.1.0" />
+    <PackageReference Include="CloudSmith.Inventory" Version="0.1.1" />
     <PackageReference Include="CloudSmith.Monitoring" Version="0.1.0" />
     <PackageReference Include="FluentMigrator.Runner.Postgres" Version="6.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.0" />
