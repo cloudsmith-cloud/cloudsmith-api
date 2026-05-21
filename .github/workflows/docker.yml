@@ -35,4 +35,4 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
-            nuget_token=${{ secrets.PACKAGES_READ_TOKEN }}
+            nuget_token=${{ secrets.GITHUB_TOKEN }}
