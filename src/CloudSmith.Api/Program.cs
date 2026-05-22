@@ -83,6 +83,9 @@ app.UseForwardedHeaders(forwardedHeadersOptions);
 
 // Middleware (auth must come after routing, before endpoints)
 app.UseMiddleware<CorrelationIdMiddleware>();
+// ADR-047 — block all non-allowlisted API traffic until first-run setup is complete.
+// Runs before authentication so the setup wizard + local login work with no IdP.
+app.UseMiddleware<SetupGateMiddleware>();
 app.UseCloudSmithIdentity();
 app.UseMiddleware<TenantContextMiddleware>();
 
@@ -94,6 +97,9 @@ app.MapHealthEndpoints();
 
 // Auth endpoints (login / logout / me)
 app.MapAuthEndpoints();
+
+// ADR-047 first-run setup + local login endpoints (anonymous)
+app.MapSetupEndpoints();
 
 // API endpoints
 app.MapConfigEndpoints();
