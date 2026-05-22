@@ -68,11 +68,18 @@ var app = builder.Build();
 app.Services.MigrateCloudSmithDatabase();
 MigrateAllDatabases(connectionString);
 
-// Trust X-Forwarded-* headers from nginx reverse proxy
-app.UseForwardedHeaders(new ForwardedHeadersOptions
+// Trust X-Forwarded-* headers from nginx reverse proxy.
+// KnownNetworks/KnownProxies default to loopback only; the portal nginx runs in a
+// separate container (non-loopback IP), so clear them to trust the forwarded headers
+// (incl. X-Forwarded-Host) it sets — required for correct OIDC redirect_uri and
+// same-origin auth cookie behind the portal reverse proxy on ACA.
+var forwardedHeadersOptions = new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost
-});
+};
+forwardedHeadersOptions.KnownNetworks.Clear();
+forwardedHeadersOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeadersOptions);
 
 // Middleware (auth must come after routing, before endpoints)
 app.UseMiddleware<CorrelationIdMiddleware>();
