@@ -1,14 +1,19 @@
 // Copyright 2026 CloudSmith Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+using System.Buffers;
+using System.Net.WebSockets;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CloudSmith.Api.Authorization;
+using CloudSmith.Api.Relay;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 
 namespace CloudSmith.Api.Endpoints;
@@ -30,14 +35,15 @@ namespace CloudSmith.Api.Endpoints;
 ///     and /api/v1/health/probe-result on a schedule.
 ///
 /// Endpoint summary:
-///   POST   /api/v1/relays/enroll-token     platform:write    issue 1h enrollment token
-///   POST   /api/v1/relays/enroll           (anonymous)       Relay first-call — token is the credential
-///   GET    /api/v1/relays                  platform:read     list relays for the caller's org
-///   GET    /api/v1/relays/{relayId}        platform:read     detail
-///   DELETE /api/v1/relays/{relayId}        platform:write    revoke (status='revoked')
-///   POST   /api/v1/clusters                platform:write    register cluster (relay or operator)
-///   POST   /api/v1/inventory/ingest        inventory:write   Relay pushes a batch of VM rows
-///   POST   /api/v1/health/probe-result     monitoring:write  Relay pushes a cluster health probe
+///   POST   /api/v1/relays/enroll-token        platform:write    issue 1h enrollment token
+///   POST   /api/v1/relays/enroll              (anonymous)       Relay first-call — token is the credential
+///   GET    /api/v1/relays                     platform:read     list relays for the caller's org
+///   GET    /api/v1/relays/{relayId}           platform:read     detail
+///   DELETE /api/v1/relays/{relayId}           platform:write    revoke (status='revoked')
+///   GET    /api/v1/relays/{relayId}/connect   (relay-identity)  persistent WebSocket hub (AB#1679)
+///   POST   /api/v1/clusters                   platform:write    register cluster (relay or operator)
+///   POST   /api/v1/inventory/ingest           inventory:write   Relay pushes a batch of VM rows
+///   POST   /api/v1/health/probe-result        monitoring:write  Relay pushes a cluster health probe
 /// </summary>
 public static class RelayEndpoints
 {
@@ -353,6 +359,92 @@ public static class RelayEndpoints
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
         .WithSummary("Revoke a relay (status='revoked'); preserves audit trail.");
 
+        // GET /api/v1/relays/{relayId}/connect — persistent WebSocket hub (AB#1679).
+        // The Relay calls this after enrollment to establish the persistent data-plane
+        // channel. Auth: X-CloudSmith-RelayId header must match the {relayId} path
+        // segment, and the relay must exist in core.relays with status != 'revoked'.
+        // Inbound frame dispatch:
+        //   inventory.push  → upsert inventory.virtual_machines (delegates to ingest logic)
+        //   health.push     → update cluster_mgmt.clusters.status
+        //   heartbeat       → update core.relays.last_seen_at
+        //   job.ack         → logged; no persistent action for MVP
+        relays.MapGet("/{relayId:guid}/connect", async (
+            Guid relayId,
+            HttpContext ctx,
+            NpgsqlDataSource db,
+            IConnectedRelayRegistry registry,
+            ILoggerFactory loggerFactory,
+            CancellationToken ct) =>
+        {
+            if (!ctx.WebSockets.IsWebSocketRequest)
+            {
+                return Results.Json(
+                    new { error = "websocket-required", message = "This endpoint only accepts WebSocket upgrade requests." },
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            // Authenticate: X-CloudSmith-RelayId header must match relayId path param.
+            var headerRelayId = ctx.Request.Headers["X-CloudSmith-RelayId"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(headerRelayId)
+                || !Guid.TryParse(headerRelayId, out var headerGuid)
+                || headerGuid != relayId)
+            {
+                return Results.Json(
+                    new { error = "relay-identity-mismatch", message = "X-CloudSmith-RelayId header is missing or does not match the path relayId." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Verify relay exists and is not revoked.
+            Guid orgId;
+            await using (var conn = await db.OpenConnectionAsync(ct))
+            await using (var cmd = new NpgsqlCommand(
+                "SELECT org_id, status FROM core.relays WHERE relay_id = @relay_id",
+                conn))
+            {
+                cmd.Parameters.AddWithValue("@relay_id", relayId);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                if (!await reader.ReadAsync(ct))
+                {
+                    return Results.Json(
+                        new { error = "relay-not-found", relayId },
+                        statusCode: StatusCodes.Status404NotFound);
+                }
+                orgId = reader.GetGuid(0);
+                var status = reader.GetString(1);
+                if (string.Equals(status, "revoked", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Results.Json(
+                        new { error = "relay-revoked", relayId },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+            }
+
+            var logger = loggerFactory.CreateLogger("CloudSmith.Api.RelayWebSocket");
+            var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+            registry.Register(relayId.ToString(), ws);
+
+            // Stamp initial last_seen_at on connect.
+            await UpdateLastSeenAsync(db, relayId, ct);
+
+            logger.LogInformation("Relay {RelayId} (org {OrgId}) WebSocket connected", relayId, orgId);
+
+            try
+            {
+                await HandleRelayWebSocketAsync(ws, relayId, orgId, db, registry, logger, ct);
+            }
+            finally
+            {
+                registry.Unregister(relayId.ToString());
+                logger.LogInformation("Relay {RelayId} WebSocket disconnected", relayId);
+                // Stamp last_seen_at on disconnect so it reflects the true last-contact time.
+                try { await UpdateLastSeenAsync(db, relayId, CancellationToken.None); } catch { /* best-effort */ }
+            }
+
+            return Results.Empty;
+        })
+        .AllowAnonymous()
+        .WithSummary("Persistent WebSocket hub — enrolled Relay connects here after enrollment (AB#1679).");
+
         // POST /api/v1/clusters — register a cluster (relay-side or operator-side).
         // Note: the legacy POST /api/v1/clusters on ClusterEndpoints was removed in
         // favour of this bridge-aware endpoint so a single route serves both flows.
@@ -600,5 +692,239 @@ public static class RelayEndpoints
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
+    }
+
+    // -------------------------------------------------------------------------
+    // WebSocket hub — frame dispatch (AB#1679)
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// JSON options for deserializing inbound relay wire frames.
+    /// The relay wire format is <c>{"$type":"...", ...}</c>; we read the
+    /// discriminator manually with <see cref="JsonDocument"/> to keep the
+    /// API side free of any relay-SDK dependency.
+    /// </summary>
+    private static readonly JsonSerializerOptions WsJsonOpts =
+        new(JsonSerializerDefaults.Web);
+
+    private static async Task HandleRelayWebSocketAsync(
+        WebSocket ws,
+        Guid relayId,
+        Guid orgId,
+        NpgsqlDataSource db,
+        IConnectedRelayRegistry registry,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+        try
+        {
+            using var assembler = new MemoryStream();
+            while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
+            {
+                assembler.SetLength(0);
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        if (ws.State == WebSocketState.CloseReceived)
+                        {
+                            await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "peer closed", ct);
+                        }
+                        return;
+                    }
+                    assembler.Write(buffer, 0, result.Count);
+                }
+                while (!result.EndOfMessage);
+
+                if (assembler.Length == 0) continue;
+
+                try
+                {
+                    await DispatchRelayFrameAsync(
+                        assembler.ToArray().AsMemory(),
+                        relayId, orgId, db, logger, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Relay {RelayId}: error dispatching frame ({Bytes} bytes)",
+                        relayId, assembler.Length);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static async Task DispatchRelayFrameAsync(
+        ReadOnlyMemory<byte> frame,
+        Guid relayId,
+        Guid orgId,
+        NpgsqlDataSource db,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        string? msgType;
+        try
+        {
+            using var doc = JsonDocument.Parse(frame);
+            msgType = doc.RootElement.TryGetProperty("$type", out var t) ? t.GetString() : null;
+        }
+        catch (JsonException ex)
+        {
+            logger.LogWarning(ex, "Relay {RelayId}: malformed JSON frame — discarding", relayId);
+            return;
+        }
+
+        switch (msgType)
+        {
+            case "heartbeat":
+                await UpdateLastSeenAsync(db, relayId, ct);
+                logger.LogDebug("Relay {RelayId}: heartbeat", relayId);
+                break;
+
+            case "inventory.push":
+                await HandleInventoryPushAsync(frame, relayId, orgId, db, logger, ct);
+                break;
+
+            case "health.push":
+                await HandleHealthPushAsync(frame, relayId, orgId, db, logger, ct);
+                break;
+
+            case "job.ack":
+                logger.LogInformation("Relay {RelayId}: job.ack received (MVP — no persistent action)", relayId);
+                break;
+
+            default:
+                logger.LogDebug("Relay {RelayId}: unknown message type '{Type}' — ignoring", relayId, msgType);
+                break;
+        }
+    }
+
+    private static async Task HandleInventoryPushAsync(
+        ReadOnlyMemory<byte> frame,
+        Guid relayId,
+        Guid orgId,
+        NpgsqlDataSource db,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        // Minimal in-line parse: { "$type":"inventory.push", "clusterId":"...", "vms":[...] }
+        using var doc = JsonDocument.Parse(frame);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty("clusterId", out var cidEl)
+            || cidEl.GetString() is not { } clusterIdStr
+            || !Guid.TryParse(clusterIdStr, out var clusterId))
+        {
+            logger.LogWarning("Relay {RelayId}: inventory.push missing or invalid clusterId", relayId);
+            return;
+        }
+
+        if (!root.TryGetProperty("vms", out var vmsEl)
+            || vmsEl.ValueKind != JsonValueKind.Array)
+        {
+            logger.LogWarning("Relay {RelayId}: inventory.push missing vms array", relayId);
+            return;
+        }
+
+        const string sql = """
+            INSERT INTO inventory.virtual_machines
+                (org_id, cluster_id, name, vm_guid, cpu_count, memory_mb, state, last_seen)
+            VALUES
+                (@org_id, @cluster_id, @name, @vm_guid, @cpu_count, @memory_mb, @state, now())
+            ON CONFLICT (cluster_id, vm_guid) WHERE vm_guid IS NOT NULL
+            DO UPDATE SET
+                name        = EXCLUDED.name,
+                cpu_count   = EXCLUDED.cpu_count,
+                memory_mb   = EXCLUDED.memory_mb,
+                state       = EXCLUDED.state,
+                last_seen   = now()
+            """;
+
+        var inserted = 0;
+        await using var conn = await db.OpenConnectionAsync(ct);
+        foreach (var vm in vmsEl.EnumerateArray())
+        {
+            var name    = vm.TryGetProperty("name", out var n) ? n.GetString() : null;
+            var vmGuid  = vm.TryGetProperty("vmId", out var g) ? g.GetString() : null;
+            var cpuCount = vm.TryGetProperty("cpuCount", out var c) ? (object?)c.GetInt32() : DBNull.Value;
+            // MemoryBytes (relay) → MemoryMb (PG): divide by 1_048_576.
+            long? memoryMb = null;
+            if (vm.TryGetProperty("memoryBytes", out var mb) && mb.ValueKind == JsonValueKind.Number)
+                memoryMb = mb.GetInt64() / 1_048_576;
+            var state   = vm.TryGetProperty("state", out var s) ? s.GetString() ?? "unknown" : "unknown";
+
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@org_id", orgId);
+            cmd.Parameters.AddWithValue("@cluster_id", clusterId);
+            cmd.Parameters.AddWithValue("@name", name);
+            cmd.Parameters.AddWithValue("@vm_guid", (object?)vmGuid ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@cpu_count", cpuCount ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@memory_mb", (object?)memoryMb ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@state", state);
+            await cmd.ExecuteNonQueryAsync(ct);
+            inserted++;
+        }
+
+        logger.LogInformation("Relay {RelayId}: inventory.push cluster={ClusterId} vms={Count}",
+            relayId, clusterId, inserted);
+    }
+
+    private static async Task HandleHealthPushAsync(
+        ReadOnlyMemory<byte> frame,
+        Guid relayId,
+        Guid orgId,
+        NpgsqlDataSource db,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        // { "$type":"health.push", "clusterId":"...", "status":"healthy", "checks":[...] }
+        using var doc = JsonDocument.Parse(frame);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty("clusterId", out var cidEl)
+            || cidEl.GetString() is not { } clusterIdStr
+            || !Guid.TryParse(clusterIdStr, out var clusterId))
+        {
+            logger.LogWarning("Relay {RelayId}: health.push missing or invalid clusterId", relayId);
+            return;
+        }
+
+        var status = root.TryGetProperty("status", out var stEl) ? stEl.GetString() ?? "unknown" : "unknown";
+        if (!AllowedHealthStatuses.Contains(status)) status = "unknown";
+
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            UPDATE cluster_mgmt.clusters
+            SET status = @status, last_health_check = now()
+            WHERE org_id = @org_id AND cluster_id = @cluster_id
+            """, conn);
+        cmd.Parameters.AddWithValue("@org_id", orgId);
+        cmd.Parameters.AddWithValue("@cluster_id", clusterId);
+        cmd.Parameters.AddWithValue("@status", status);
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        logger.LogInformation("Relay {RelayId}: health.push cluster={ClusterId} status={Status}",
+            relayId, clusterId, status);
+    }
+
+    private static async Task UpdateLastSeenAsync(
+        NpgsqlDataSource db,
+        Guid relayId,
+        CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "UPDATE core.relays SET last_seen_at = now() WHERE relay_id = @relay_id",
+            conn);
+        cmd.Parameters.AddWithValue("@relay_id", relayId);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 }
