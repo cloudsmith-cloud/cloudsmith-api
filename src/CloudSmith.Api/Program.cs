@@ -105,8 +105,12 @@ app.MapSetupEndpoints();
 app.MapConfigEndpoints();
 app.MapClusterEndpoints();
 app.MapInventoryEndpoints();
-app.MapPlatformEndpoints();   // AB#1640 Modules list (Platform Management group)
-app.MapIdentityProviderEndpoints();   // AB#1643 Identity Providers list
+app.MapPlatformEndpoints();   // AB#1640-1642 Modules (Platform Management group)
+app.MapIdentityProviderEndpoints();   // AB#1643-1647 Identity Providers CRUD
+app.MapUsersEndpoints();              // AB#1648-1649 Users + invite
+app.MapAuditEndpoints();              // AB#1651 Audit log query
+app.MapSitesEndpoints();              // AB#1652 Sites CRUD
+app.MapSecretsEndpoints();            // AB#1653 Secrets refs CRUD
 
 // OpenAPI / Scalar docs
 app.MapOpenApi();
