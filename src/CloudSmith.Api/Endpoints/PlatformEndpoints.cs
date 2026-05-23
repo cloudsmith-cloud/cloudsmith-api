@@ -41,6 +41,22 @@ public static class PlatformEndpoints
 
     public sealed record InstallModuleRequest(string PackageUrl, string PackageId, string DisplayName, string Version, string SdkVersion);
 
+    public sealed record ModulePermissionResponse(string PermissionId, string? Description);
+
+    public sealed record ModuleDependencyResponse(
+        string ModuleKey,
+        string? DisplayName,
+        string RequiredVersion,
+        string? InstalledVersion,
+        bool Satisfied);
+
+    public sealed record ModuleHealthCheckResponse(string Name, string Status, string? Description);
+
+    public sealed record ModuleHealthResponse(
+        string Status,
+        string? LastProbe,
+        IReadOnlyList<ModuleHealthCheckResponse> Checks);
+
     public static IEndpointRouteBuilder MapPlatformEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/v1/platform").WithTags("Platform");
@@ -234,6 +250,232 @@ public static class PlatformEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
         .WithSummary("Mark a module for uninstall (loader removes on next API restart).");
+
+        // GET /api/v1/platform/modules/{key}/permissions
+        // Reads the module's manifest_json.permissionsRequired array and projects it.
+        // Expected manifest shape: { "permissionsRequired": [{ "id": "monitoring:read", "description": "View metrics" }] }
+        group.MapGet("/modules/{key}/permissions", async (
+            string key,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+            {
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            const string sql = """
+                SELECT manifest_json
+                FROM core.module_registry
+                WHERE org_id = @org_id AND package_id = @package_id
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@org_id", orgId);
+            cmd.Parameters.AddWithValue("@package_id", key);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                return Results.NotFound(new { error = "module-not-found", packageId = key });
+            }
+
+            var manifestJson = reader.IsDBNull(0) ? null : reader.GetString(0);
+            var results = new List<ModulePermissionResponse>();
+            if (!string.IsNullOrEmpty(manifestJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(manifestJson);
+                    if (doc.RootElement.TryGetProperty("permissionsRequired", out var permsProp)
+                        && permsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var perm in permsProp.EnumerateArray())
+                        {
+                            string? id = null;
+                            string? description = null;
+                            if (perm.ValueKind == JsonValueKind.String)
+                            {
+                                // Tolerate a flat ["monitoring:read"] shape.
+                                id = perm.GetString();
+                            }
+                            else if (perm.ValueKind == JsonValueKind.Object)
+                            {
+                                if (perm.TryGetProperty("id", out var idProp))
+                                    id = idProp.GetString();
+                                if (perm.TryGetProperty("description", out var descProp))
+                                    description = descProp.GetString();
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(id))
+                            {
+                                results.Add(new ModulePermissionResponse(id!, description));
+                            }
+                        }
+                    }
+                }
+                catch (JsonException) { /* ignore malformed manifest — return empty */ }
+            }
+
+            return Results.Ok(results);
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
+        .WithSummary("List permissions required by an installed module.");
+
+        // GET /api/v1/platform/modules/{key}/dependencies
+        // Reads manifest_json.dependencies and joins against installed modules in the org.
+        // Expected shape: { "dependencies": [{ "moduleKey": "cloudsmith-core", "requiredVersion": ">=1.4.0" }] }
+        group.MapGet("/modules/{key}/dependencies", async (
+            string key,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+            {
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+
+            // Load this module's manifest.
+            string? manifestJson;
+            await using (var cmd = new NpgsqlCommand("""
+                SELECT manifest_json
+                FROM core.module_registry
+                WHERE org_id = @org_id AND package_id = @package_id
+                """, conn))
+            {
+                cmd.Parameters.AddWithValue("@org_id", orgId);
+                cmd.Parameters.AddWithValue("@package_id", key);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                if (!await reader.ReadAsync(ct))
+                {
+                    return Results.NotFound(new { error = "module-not-found", packageId = key });
+                }
+                manifestJson = reader.IsDBNull(0) ? null : reader.GetString(0);
+            }
+
+            // Parse declared dependencies.
+            var declared = new List<(string ModuleKey, string RequiredVersion)>();
+            if (!string.IsNullOrEmpty(manifestJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(manifestJson);
+                    if (doc.RootElement.TryGetProperty("dependencies", out var depsProp)
+                        && depsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var dep in depsProp.EnumerateArray())
+                        {
+                            if (dep.ValueKind != JsonValueKind.Object) continue;
+                            string? mk = null;
+                            string? rv = null;
+                            if (dep.TryGetProperty("moduleKey", out var mkProp))
+                                mk = mkProp.GetString();
+                            if (dep.TryGetProperty("requiredVersion", out var rvProp))
+                                rv = rvProp.GetString();
+                            if (!string.IsNullOrWhiteSpace(mk))
+                            {
+                                declared.Add((mk!, rv ?? "*"));
+                            }
+                        }
+                    }
+                }
+                catch (JsonException) { /* ignore malformed manifest */ }
+            }
+
+            if (declared.Count == 0)
+            {
+                return Results.Ok(Array.Empty<ModuleDependencyResponse>());
+            }
+
+            // Look up installed versions for the declared keys.
+            var installed = new Dictionary<string, (string DisplayName, string Version)>(StringComparer.OrdinalIgnoreCase);
+            await using (var cmd = new NpgsqlCommand("""
+                SELECT package_id, display_name, version
+                FROM core.module_registry
+                WHERE org_id = @org_id AND package_id = ANY(@keys)
+                """, conn))
+            {
+                cmd.Parameters.AddWithValue("@org_id", orgId);
+                cmd.Parameters.AddWithValue("@keys", declared.Select(d => d.ModuleKey).Distinct().ToArray());
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    installed[reader.GetString(0)] = (reader.GetString(1), reader.GetString(2));
+                }
+            }
+
+            var results = new List<ModuleDependencyResponse>(declared.Count);
+            foreach (var (mk, rv) in declared)
+            {
+                installed.TryGetValue(mk, out var info);
+                var installedVersion = info.Version; // null when key not in dictionary
+                // TODO: full semver range satisfaction (e.g. ">=1.4.0", "^2.0.0") — AB#TBD follow-up.
+                // For MVP we treat "installed exists" as satisfied.
+                var satisfied = installedVersion != null;
+                results.Add(new ModuleDependencyResponse(
+                    ModuleKey: mk,
+                    DisplayName: info.DisplayName,
+                    RequiredVersion: rv,
+                    InstalledVersion: installedVersion,
+                    Satisfied: satisfied));
+            }
+
+            return Results.Ok(results);
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
+        .WithSummary("List declared dependencies for an installed module and their satisfaction state.");
+
+        // GET /api/v1/platform/modules/{key}/health
+        // MVP stub: no real probe infrastructure exists yet. Real per-module health probing
+        // (per the SDK contract — IModuleHealthCheck) is a follow-up: AB#TBD.
+        // The endpoint still validates the module exists and is scoped to the caller's org.
+        group.MapGet("/modules/{key}/health", async (
+            string key,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+            {
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            const string sql = """
+                SELECT 1
+                FROM core.module_registry
+                WHERE org_id = @org_id AND package_id = @package_id
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@org_id", orgId);
+            cmd.Parameters.AddWithValue("@package_id", key);
+            var exists = await cmd.ExecuteScalarAsync(ct);
+            if (exists is null)
+            {
+                return Results.NotFound(new { error = "module-not-found", packageId = key });
+            }
+
+            // Stub response — real health requires module-health probing infrastructure
+            // (AB#TBD-followup: implement IModuleHealthCheck per SDK contract, collect results
+            // via the loader on a schedule, persist to core.module_health_history).
+            var response = new ModuleHealthResponse(
+                Status: "Unknown",
+                LastProbe: null,
+                Checks: Array.Empty<ModuleHealthCheckResponse>());
+
+            return Results.Ok(response);
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
+        .WithSummary("Module health probe results (MVP stub — real probing is a follow-up).");
 
         return app;
     }
