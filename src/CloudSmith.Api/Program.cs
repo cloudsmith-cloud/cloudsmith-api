@@ -3,6 +3,7 @@
 
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Endpoints;
+using CloudSmith.Api.Relay;
 using Microsoft.AspNetCore.HttpOverrides;
 using CloudSmith.ClusterMgmt;
 using CloudSmith.ClusterMgmt.Services;
@@ -62,6 +63,9 @@ builder.Services.AddCloudSmithMonitoring(opts =>
 builder.Services.AddCloudSmithAuthorization();
 builder.Services.AddOpenApi();
 
+// Relay WebSocket hub — in-memory registry of connected relay sockets (AB#1679)
+builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>();
+
 var app = builder.Build();
 
 // Run all module migrations on startup using isolated scopes to avoid FM runner conflicts
@@ -80,6 +84,13 @@ var forwardedHeadersOptions = new ForwardedHeadersOptions
 forwardedHeadersOptions.KnownNetworks.Clear();
 forwardedHeadersOptions.KnownProxies.Clear();
 app.UseForwardedHeaders(forwardedHeadersOptions);
+
+// WebSocket support — must be registered before the endpoint middleware so that
+// the /api/v1/relays/{id}/connect hub can accept WebSocket upgrade requests (AB#1679).
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(60),
+});
 
 // Middleware (auth must come after routing, before endpoints)
 app.UseMiddleware<CorrelationIdMiddleware>();
