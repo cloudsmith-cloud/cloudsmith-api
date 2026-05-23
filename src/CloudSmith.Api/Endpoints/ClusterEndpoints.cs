@@ -1,7 +1,6 @@
 // Copyright 2026 CloudSmith Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-using CloudSmith.ClusterMgmt.Models;
 using CloudSmith.ClusterMgmt.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -28,11 +27,10 @@ public static class ClusterEndpoints
             return cluster is null ? Results.NotFound() : Results.Ok(cluster);
         });
 
-        clusters.MapPost("/", async (RegisterClusterRequest req, IClusterService svc, CancellationToken ct) =>
-        {
-            var id = await svc.RegisterClusterAsync(req, ct);
-            return Results.Created($"/api/v1/clusters/{id}", new { clusterId = id });
-        });
+        // POST /api/v1/clusters has moved to RelayEndpoints.MapRelayEndpoints — the
+        // bridge-aware version supports clusterType + relayId (AB#1670). The route
+        // is otherwise functionally equivalent; both flows insert into
+        // cluster_mgmt.clusters scoped to the caller's org.
 
         clusters.MapGet("/{id:guid}/nodes", async (Guid id, HttpContext ctx, INodeService svc, CancellationToken ct) =>
         {

@@ -111,6 +111,7 @@ app.MapUsersEndpoints();              // AB#1648-1649 Users + invite
 app.MapAuditEndpoints();              // AB#1651 Audit log query
 app.MapSitesEndpoints();              // AB#1652 Sites CRUD
 app.MapSecretsEndpoints();            // AB#1653 Secrets refs CRUD
+app.MapRelayEndpoints();              // AB#1670 Relay bridge — enrollment, clusters POST, inventory ingest, health probe
 
 // OpenAPI / Scalar docs
 app.MapOpenApi();
