@@ -105,6 +105,8 @@ app.MapSetupEndpoints();
 app.MapConfigEndpoints();
 app.MapClusterEndpoints();
 app.MapInventoryEndpoints();
+app.MapPlatformEndpoints();   // AB#1640 Modules list (Platform Management group)
+app.MapIdentityProviderEndpoints();   // AB#1643 Identity Providers list
 
 // OpenAPI / Scalar docs
 app.MapOpenApi();
