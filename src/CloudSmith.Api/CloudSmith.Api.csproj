@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <PackageReference Include="CloudSmith.Sdk" Version="0.1.0" />
-    <PackageReference Include="CloudSmith.Core" Version="0.3.0" />
+    <PackageReference Include="CloudSmith.Core" Version="0.4.0" />
     <PackageReference Include="CloudSmith.Identity" Version="0.1.1" />
     <PackageReference Include="CloudSmith.ClusterMgmt" Version="0.1.0" />
     <PackageReference Include="CloudSmith.Inventory" Version="0.1.1" />
