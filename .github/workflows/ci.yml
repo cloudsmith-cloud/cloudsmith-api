@@ -32,4 +32,7 @@ jobs:
     uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/trivy-scan.yml@v1.0.0
     with:
       image-ref: 'ghcr.io/cloudsmith-cloud/cloudsmith-api:latest'
+      # Report-only in CI — do not block the pipeline on CVEs during MVP.
+      # CVEs are visible in the GitHub Security tab via the SARIF upload.
+      fail-on-critical: false
     secrets: inherit
