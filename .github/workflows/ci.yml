@@ -15,7 +15,9 @@ jobs:
   build-test:
     uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/dotnet-build-test.yml@v1.0.0
     with:
-      run-integration-tests: true
+      # Integration tests require a live PostgreSQL instance not available on GitHub-hosted runners.
+      # Validated in deployment smoke tests instead.
+      run-integration-tests: false
     secrets: inherit
   docker:
     if: github.ref == 'refs/heads/main'
