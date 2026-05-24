@@ -11,7 +11,9 @@ public static class AuthorizationExtensions
     {
         services.AddAuthentication();
         services.AddAuthorization();
-        services.AddSingleton<IAuthorizationHandler, PermissionAuthorizationHandler>();
+        // PermissionAuthorizationHandler depends on ICloudSmithAuthorizationService (Scoped),
+        // so the handler itself must be Scoped — not Singleton.
+        services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
         return services;
     }
 
