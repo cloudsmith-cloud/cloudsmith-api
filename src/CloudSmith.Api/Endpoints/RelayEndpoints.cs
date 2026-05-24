@@ -857,7 +857,18 @@ public static class RelayEndpoints
             long? memoryMb = null;
             if (vm.TryGetProperty("memoryBytes", out var mb) && mb.ValueKind == JsonValueKind.Number)
                 memoryMb = mb.GetInt64() / 1_048_576;
-            var state   = vm.TryGetProperty("state", out var s) ? s.GetString() ?? "unknown" : "unknown";
+            var rawState = vm.TryGetProperty("state", out var s) ? s.GetString() ?? "unknown" : "unknown";
+            // Normalize Hyper-V EnabledState strings to VmState enum names used by the read path.
+            var state = rawState.ToLowerInvariant() switch
+            {
+                "running"               => "running",
+                "off" or "stopped"      => "stopped",
+                "paused"                => "paused",
+                "saved" or "suspended"  => "saved",
+                "starting"              => "starting",
+                "stopping"              => "stopping",
+                _                       => "unknown",
+            };
 
             if (string.IsNullOrWhiteSpace(name)) continue;
 
