@@ -14,7 +14,7 @@
   <ItemGroup>
     <PackageReference Include="CloudSmith.Sdk" Version="0.1.0" />
     <PackageReference Include="CloudSmith.Core" Version="0.5.0" />
-    <PackageReference Include="CloudSmith.Identity" Version="0.1.1" />
+    <PackageReference Include="CloudSmith.Identity" Version="0.1.2" />
     <PackageReference Include="CloudSmith.ClusterMgmt" Version="0.2.0" />
     <PackageReference Include="CloudSmith.Inventory" Version="0.1.1" />
     <PackageReference Include="CloudSmith.Monitoring" Version="0.1.0" />
