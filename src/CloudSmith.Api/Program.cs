@@ -36,8 +36,9 @@ var otelBuilder = builder.Services.AddOpenTelemetry()
         .AddAspNetCoreInstrumentation()
         .AddOtlpExporter(o => o.Endpoint = new Uri(
             builder.Configuration["OpenTelemetry:Endpoint"] ?? "http://localhost:4317")));
-if (!string.IsNullOrEmpty(builder.Configuration["ApplicationInsights:ConnectionString"]))
-    otelBuilder.UseAzureMonitor();
+var aiConnString = builder.Configuration["ApplicationInsights:ConnectionString"];
+if (!string.IsNullOrEmpty(aiConnString))
+    otelBuilder.UseAzureMonitor(o => o.ConnectionString = aiConnString);
 
 // Platform kernel (migrations + RBAC + Config + health + NpgsqlDataSource)
 var connectionString = builder.Configuration.GetConnectionString("Default")
