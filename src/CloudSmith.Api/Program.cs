@@ -14,6 +14,7 @@ using CloudSmith.Inventory.Services;
 using CloudSmith.Monitoring;
 using FluentMigrator.Runner;
 using Microsoft.Extensions.DependencyInjection;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
@@ -28,13 +29,15 @@ builder.Host.UseSerilog((ctx, cfg) => cfg
     .Enrich.WithProperty("service", "cloudsmith-api")
     .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {CorrelationId} {TenantId} {Message:lj}{NewLine}{Exception}"));
 
-// OpenTelemetry tracing → otel-collector at 4317
-builder.Services.AddOpenTelemetry()
+// OpenTelemetry tracing — OTLP for local docker-compose; Azure Monitor for PaaS
+var otelBuilder = builder.Services.AddOpenTelemetry()
     .ConfigureResource(r => r.AddService("cloudsmith-api"))
     .WithTracing(t => t
         .AddAspNetCoreInstrumentation()
         .AddOtlpExporter(o => o.Endpoint = new Uri(
             builder.Configuration["OpenTelemetry:Endpoint"] ?? "http://localhost:4317")));
+if (!string.IsNullOrEmpty(builder.Configuration["ApplicationInsights:ConnectionString"]))
+    otelBuilder.UseAzureMonitor();
 
 // Platform kernel (migrations + RBAC + Config + health + NpgsqlDataSource)
 var connectionString = builder.Configuration.GetConnectionString("Default")
