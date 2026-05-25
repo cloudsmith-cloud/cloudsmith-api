@@ -22,7 +22,7 @@ public sealed class TenantContextMiddleware
                 ctx.Items["OrgId"] = orgId;
                 using (LogContext.PushProperty("TenantId", orgId))
                 {
-                    if (Guid.TryParse(ctx.User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+                    if (Guid.TryParse(ctx.User.FindFirstValue("sub") ?? ctx.User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
                         ctx.Items["UserId"] = userId;
 
                     await _next(ctx);
