@@ -97,8 +97,14 @@ app.UseMiddleware<CorrelationIdMiddleware>();
 // ADR-047 — block all non-allowlisted API traffic until first-run setup is complete.
 // Runs before authentication so the setup wizard + local login work with no IdP.
 app.UseMiddleware<SetupGateMiddleware>();
-app.UseCloudSmithIdentity();
+// UseAuthentication + UseAuthorization — must run before TenantContextMiddleware so
+// that the identity is resolved first, but TenantContextMiddleware must run BEFORE
+// UseAuthorization so that ctx.Items["OrgId"/"UserId"] are populated when
+// PermissionAuthorizationHandler fires during endpoint authorization evaluation.
+app.UseAuthentication();
 app.UseMiddleware<TenantContextMiddleware>();
+// UseAuthorization fires permission checks against already-populated ctx.Items.
+app.UseAuthorization();
 
 // Prometheus metrics scraping endpoint
 app.UseOpenTelemetryPrometheusScrapingEndpoint();

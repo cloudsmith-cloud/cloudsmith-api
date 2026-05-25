@@ -9,17 +9,27 @@ namespace CloudSmith.Api.Authorization;
 public sealed class PermissionAuthorizationHandler : AuthorizationHandler<PermissionRequirement>
 {
     private readonly ICloudSmithAuthorizationService _authz;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
-    public PermissionAuthorizationHandler(ICloudSmithAuthorizationService authz)
+    public PermissionAuthorizationHandler(
+        ICloudSmithAuthorizationService authz,
+        IHttpContextAccessor httpContextAccessor)
     {
         _authz = authz;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     protected override async Task HandleRequirementAsync(
         AuthorizationHandlerContext context,
         PermissionRequirement requirement)
     {
-        if (context.Resource is not HttpContext http) return;
+        // context.Resource is HttpContext when called from endpoint routing (minimal APIs).
+        // Fall back to IHttpContextAccessor for cases where the resource is set differently
+        // (e.g., policy-based auth called outside endpoint routing context).
+        var http = context.Resource as HttpContext
+                   ?? _httpContextAccessor.HttpContext;
+
+        if (http is null) return;
 
         var orgId  = http.GetOrgId();
         var userId = http.GetUserId();

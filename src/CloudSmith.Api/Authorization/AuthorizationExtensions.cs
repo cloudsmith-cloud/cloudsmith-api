@@ -11,6 +11,10 @@ public static class AuthorizationExtensions
     {
         services.AddAuthentication();
         services.AddAuthorization();
+        // IHttpContextAccessor — needed by PermissionAuthorizationHandler as a fallback
+        // when context.Resource is not the HttpContext (e.g., policy-based auth called
+        // outside standard endpoint routing). AddHttpContextAccessor is idempotent.
+        services.AddHttpContextAccessor();
         // PermissionAuthorizationHandler depends on ICloudSmithAuthorizationService (Scoped),
         // so the handler itself must be Scoped — not Singleton.
         services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
