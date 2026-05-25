@@ -14,6 +14,7 @@ using CloudSmith.Inventory.Services;
 using CloudSmith.Monitoring;
 using FluentMigrator.Runner;
 using Microsoft.Extensions.DependencyInjection;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
@@ -28,13 +29,15 @@ builder.Host.UseSerilog((ctx, cfg) => cfg
     .Enrich.WithProperty("service", "cloudsmith-api")
     .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {CorrelationId} {TenantId} {Message:lj}{NewLine}{Exception}"));
 
-// OpenTelemetry tracing → otel-collector at 4317
-builder.Services.AddOpenTelemetry()
+// OpenTelemetry tracing — OTLP for local docker-compose; Azure Monitor for PaaS
+var otelBuilder = builder.Services.AddOpenTelemetry()
     .ConfigureResource(r => r.AddService("cloudsmith-api"))
     .WithTracing(t => t
         .AddAspNetCoreInstrumentation()
         .AddOtlpExporter(o => o.Endpoint = new Uri(
             builder.Configuration["OpenTelemetry:Endpoint"] ?? "http://localhost:4317")));
+if (!string.IsNullOrEmpty(builder.Configuration["ApplicationInsights:ConnectionString"]))
+    otelBuilder.UseAzureMonitor();
 
 // Platform kernel (migrations + RBAC + Config + health + NpgsqlDataSource)
 var connectionString = builder.Configuration.GetConnectionString("Default")
@@ -97,8 +100,14 @@ app.UseMiddleware<CorrelationIdMiddleware>();
 // ADR-047 — block all non-allowlisted API traffic until first-run setup is complete.
 // Runs before authentication so the setup wizard + local login work with no IdP.
 app.UseMiddleware<SetupGateMiddleware>();
-app.UseCloudSmithIdentity();
+// UseAuthentication + UseAuthorization — must run before TenantContextMiddleware so
+// that the identity is resolved first, but TenantContextMiddleware must run BEFORE
+// UseAuthorization so that ctx.Items["OrgId"/"UserId"] are populated when
+// PermissionAuthorizationHandler fires during endpoint authorization evaluation.
+app.UseAuthentication();
 app.UseMiddleware<TenantContextMiddleware>();
+// UseAuthorization fires permission checks against already-populated ctx.Items.
+app.UseAuthorization();
 
 // Prometheus metrics scraping endpoint
 app.UseOpenTelemetryPrometheusScrapingEndpoint();
