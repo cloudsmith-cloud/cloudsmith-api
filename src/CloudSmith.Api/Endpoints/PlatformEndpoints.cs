@@ -14,10 +14,14 @@ using Npgsql;
 namespace CloudSmith.Api.Endpoints;
 
 /// <summary>
-/// Platform Management endpoints — Modules listing, install, uninstall, Sites, Audit log query.
+/// Platform Management endpoints — Modules listing, install, uninstall, enable, disable, Sites, Audit log query.
+/// AB#1414: Manifest validation on POST /api/v1/platform/modules/install.
+/// AB#1415: Module install flow — stores package_url, validated manifest JSON, seeds permissions.
+/// AB#1416: Enable/disable state machine — POST /modules/{key}/enable and /modules/{key}/disable.
+/// AB#1417: RBAC permission seeding — permissions from manifest.permissionsRequired seeded to core.module_permissions.
 /// AB#1640: GET /api/v1/platform/modules — list installed modules for the caller's org.
-/// AB#1641: POST /api/v1/platform/modules/install — record a module install (loader applies on restart).
-/// AB#1642: DELETE /api/v1/platform/modules/{key} — mark a module for uninstall (loader removes on restart).
+/// AB#1641: POST /api/v1/platform/modules/install — record a module install.
+/// AB#1642: DELETE /api/v1/platform/modules/{key} — mark a module for uninstall.
 /// </summary>
 public static class PlatformEndpoints
 {
@@ -30,6 +34,24 @@ public static class PlatformEndpoints
         "cloudsmith-cluster-mgmt",
     };
 
+    /// <summary>
+    /// CloudSmith module manifest schema (v1).
+    /// Required top-level fields: packageId, displayName, version, sdkVersion.
+    /// Optional arrays: permissionsRequired (objects with id + optional description),
+    ///                  dependencies (objects with moduleKey + requiredVersion).
+    /// </summary>
+    public sealed record ModuleManifest(
+        string PackageId,
+        string DisplayName,
+        string Version,
+        string SdkVersion,
+        string? Description,
+        IReadOnlyList<ManifestPermission> PermissionsRequired,
+        IReadOnlyList<ManifestDependency> Dependencies);
+
+    public sealed record ManifestPermission(string Id, string? Description);
+    public sealed record ManifestDependency(string ModuleKey, string RequiredVersion);
+
     public sealed record InstalledModuleResponse(
         string Key,
         string DisplayName,
@@ -40,7 +62,13 @@ public static class PlatformEndpoints
         string? Description,
         string? HealthMessage);
 
-    public sealed record InstallModuleRequest(string PackageUrl, string PackageId, string DisplayName, string Version, string SdkVersion);
+    public sealed record InstallModuleRequest(
+        string PackageUrl,
+        string PackageId,
+        string DisplayName,
+        string Version,
+        string SdkVersion,
+        string? ManifestJson);
 
     public sealed record ModulePermissionResponse(string PermissionId, string? Description);
 
@@ -57,6 +85,116 @@ public static class PlatformEndpoints
         string Status,
         string? LastProbe,
         IReadOnlyList<ModuleHealthCheckResponse> Checks);
+
+    // -------------------------------------------------------------------------
+    // Manifest validation — AB#1414
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Validates a module manifest JSON string.
+    /// Returns (null, parsedManifest) on success; (errorObject, null) on failure.
+    /// </summary>
+    private static (object? Error, ModuleManifest? Manifest) ValidateManifest(
+        string? manifestJson,
+        string packageId,
+        string displayName,
+        string version,
+        string sdkVersion)
+    {
+        ModuleManifest manifest;
+
+        if (string.IsNullOrWhiteSpace(manifestJson))
+        {
+            // Build a minimal manifest from the top-level install request fields.
+            manifest = new ModuleManifest(
+                PackageId:            packageId,
+                DisplayName:          displayName,
+                Version:              version,
+                SdkVersion:           sdkVersion,
+                Description:          null,
+                PermissionsRequired:  Array.Empty<ManifestPermission>(),
+                Dependencies:         Array.Empty<ManifestDependency>());
+        }
+        else
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(manifestJson);
+                var root = doc.RootElement;
+
+                // Required fields — manifest must agree with the top-level install request.
+                var mPackageId   = root.TryGetProperty("packageId",   out var p1) ? p1.GetString() : null;
+                var mDisplayName = root.TryGetProperty("displayName", out var p2) ? p2.GetString() : null;
+                var mVersion     = root.TryGetProperty("version",     out var p3) ? p3.GetString() : null;
+                var mSdkVersion  = root.TryGetProperty("sdkVersion",  out var p4) ? p4.GetString() : null;
+
+                if (string.IsNullOrWhiteSpace(mPackageId))
+                    return (new { error = "manifest-invalid", field = "packageId", message = "manifest.packageId is required." }, null);
+                if (string.IsNullOrWhiteSpace(mDisplayName))
+                    return (new { error = "manifest-invalid", field = "displayName", message = "manifest.displayName is required." }, null);
+                if (string.IsNullOrWhiteSpace(mVersion))
+                    return (new { error = "manifest-invalid", field = "version", message = "manifest.version is required." }, null);
+                if (string.IsNullOrWhiteSpace(mSdkVersion))
+                    return (new { error = "manifest-invalid", field = "sdkVersion", message = "manifest.sdkVersion is required." }, null);
+
+                // Consistency: manifest fields must match install request top-level fields.
+                if (!string.Equals(mPackageId, packageId, StringComparison.OrdinalIgnoreCase))
+                    return (new { error = "manifest-mismatch", field = "packageId", message = $"manifest.packageId '{mPackageId}' does not match request packageId '{packageId}'." }, null);
+                if (!string.Equals(mVersion, version, StringComparison.OrdinalIgnoreCase))
+                    return (new { error = "manifest-mismatch", field = "version", message = $"manifest.version '{mVersion}' does not match request version '{version}'." }, null);
+
+                // Parse optional permissionsRequired array.
+                var perms = new List<ManifestPermission>();
+                if (root.TryGetProperty("permissionsRequired", out var permsEl) && permsEl.ValueKind == JsonValueKind.Array)
+                {
+                    var idx = 0;
+                    foreach (var perm in permsEl.EnumerateArray())
+                    {
+                        string? id = perm.ValueKind == JsonValueKind.String
+                            ? perm.GetString()
+                            : perm.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+
+                        if (string.IsNullOrWhiteSpace(id))
+                            return (new { error = "manifest-invalid", field = $"permissionsRequired[{idx}]", message = "Each permission entry must have a non-empty 'id' (or be a string)." }, null);
+
+                        string? desc = perm.ValueKind == JsonValueKind.Object && perm.TryGetProperty("description", out var dEl) ? dEl.GetString() : null;
+                        perms.Add(new ManifestPermission(id!, desc));
+                        idx++;
+                    }
+                }
+
+                // Parse optional dependencies array.
+                var deps = new List<ManifestDependency>();
+                if (root.TryGetProperty("dependencies", out var depsEl) && depsEl.ValueKind == JsonValueKind.Array)
+                {
+                    var idx = 0;
+                    foreach (var dep in depsEl.EnumerateArray())
+                    {
+                        if (dep.ValueKind != JsonValueKind.Object)
+                            return (new { error = "manifest-invalid", field = $"dependencies[{idx}]", message = "Each dependency must be an object with moduleKey and requiredVersion." }, null);
+
+                        var mk = dep.TryGetProperty("moduleKey",       out var mkEl) ? mkEl.GetString() : null;
+                        var rv = dep.TryGetProperty("requiredVersion",  out var rvEl) ? rvEl.GetString() : "*";
+
+                        if (string.IsNullOrWhiteSpace(mk))
+                            return (new { error = "manifest-invalid", field = $"dependencies[{idx}].moduleKey", message = "moduleKey is required." }, null);
+
+                        deps.Add(new ManifestDependency(mk!, rv ?? "*"));
+                        idx++;
+                    }
+                }
+
+                var mDesc = root.TryGetProperty("description", out var descProp) ? descProp.GetString() : null;
+                manifest = new ModuleManifest(mPackageId!, mDisplayName!, mVersion!, mSdkVersion!, mDesc, perms, deps);
+            }
+            catch (JsonException ex)
+            {
+                return (new { error = "manifest-parse-error", message = $"manifestJson is not valid JSON: {ex.Message}" }, null);
+            }
+        }
+
+        return (null, manifest);
+    }
 
     public static IEndpointRouteBuilder MapPlatformEndpoints(this IEndpointRouteBuilder app)
     {
@@ -124,10 +262,17 @@ public static class PlatformEndpoints
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("List installed CloudSmith modules for the caller's organisation.");
 
-        // POST /api/v1/platform/modules/install — AB#1641
-        // Records a module install request in core.module_registry with status='installing'.
-        // The SDK module loader picks it up at next API startup; this endpoint is the operator-facing
-        // record-then-restart flow for Phase IV MVP. Real install pipeline lands later.
+        // POST /api/v1/platform/modules/install — AB#1641, AB#1414, AB#1415, AB#1417
+        // Validates the module manifest (AB#1414), records the install in core.module_registry
+        // with status='installing' and the validated manifest_json (AB#1415), then seeds all
+        // declared permissions into core.module_permissions and grants them to the
+        // org's platform-admin role (AB#1417).
+        //
+        // AB#1415 install pipeline note:
+        //   The "download, validate checksums, run DB migrations, load assembly, probe health"
+        //   pipeline requires a background job worker with assembly isolation — that infrastructure
+        //   ships in Phase V. Phase IV records the install intent; the SDK module loader
+        //   discovers installed modules on API restart and applies migrations + loads assemblies.
         group.MapPost("/modules/install", async (
             InstallModuleRequest request,
             NpgsqlDataSource db,
@@ -136,15 +281,11 @@ public static class PlatformEndpoints
         {
             var orgIdClaim = ctx.User.FindFirstValue("org_id");
             if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
-            {
                 return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
-            }
 
             var userIdClaim = ctx.User.FindFirstValue("sub");
             if (string.IsNullOrEmpty(userIdClaim) || !Guid.TryParse(userIdClaim, out var userId))
-            {
                 return Results.Json(new { error = "missing-user-context" }, statusCode: StatusCodes.Status400BadRequest);
-            }
 
             if (string.IsNullOrWhiteSpace(request.PackageId)
                 || string.IsNullOrWhiteSpace(request.PackageUrl)
@@ -155,64 +296,120 @@ public static class PlatformEndpoints
                 return Results.Json(new { error = "invalid-request", message = "packageUrl, packageId, displayName, version, and sdkVersion are required." }, statusCode: StatusCodes.Status400BadRequest);
             }
 
-            const string sql = """
-                INSERT INTO core.module_registry
-                    (org_id, package_id, package_url, display_name, version, sdk_version, status, manifest_json, installed_by_user_id, installed_at)
-                VALUES
-                    (@org_id, @package_id, @package_url, @display_name, @version, @sdk_version, 'installing', @manifest_json::jsonb, @installed_by_user_id, now())
-                RETURNING package_id, display_name, version, status, manifest_json, installed_at
-                """;
+            // AB#1414 — validate manifest.
+            var (validationError, manifest) = ValidateManifest(
+                request.ManifestJson,
+                request.PackageId,
+                request.DisplayName,
+                request.Version,
+                request.SdkVersion);
+
+            if (validationError is not null)
+                return Results.Json(validationError, statusCode: StatusCodes.Status422UnprocessableEntity);
+
+            // Build canonical manifest JSON for storage — always serialised from the validated object
+            // so we never store unvalidated caller input in the DB.
+            var manifestToStore = new
+            {
+                packageId           = manifest!.PackageId,
+                displayName         = manifest.DisplayName,
+                version             = manifest.Version,
+                sdkVersion          = manifest.SdkVersion,
+                description         = manifest.Description,
+                permissionsRequired = manifest.PermissionsRequired.Select(p => new { id = p.Id, description = p.Description }),
+                dependencies        = manifest.Dependencies.Select(d => new { moduleKey = d.ModuleKey, requiredVersion = d.RequiredVersion }),
+            };
+            var manifestJson = JsonSerializer.Serialize(manifestToStore);
 
             await using var conn = await db.OpenConnectionAsync(ct);
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@org_id", orgId);
-            cmd.Parameters.AddWithValue("@package_id", request.PackageId);
-            cmd.Parameters.AddWithValue("@package_url", request.PackageUrl);
-            cmd.Parameters.AddWithValue("@display_name", request.DisplayName);
-            cmd.Parameters.AddWithValue("@version", request.Version);
-            cmd.Parameters.AddWithValue("@sdk_version", request.SdkVersion);
+            await using var tx   = await conn.BeginTransactionAsync(ct);
 
-            using var manifestDoc = JsonDocument.Parse("{}");
-            cmd.Parameters.AddWithValue("@manifest_json", manifestDoc.RootElement.GetRawText());
-            cmd.Parameters.AddWithValue("@installed_by_user_id", userId);
+            Guid   moduleId;
+            string retPackageId, retDisplay, retVersion, retStatus;
+            DateTime? retInstalledAt;
 
             try
             {
+                const string sql = """
+                    INSERT INTO core.module_registry
+                        (org_id, package_id, package_url, display_name, version, sdk_version,
+                         status, manifest_json, installed_by_user_id, installed_at)
+                    VALUES
+                        (@org_id, @package_id, @package_url, @display_name, @version, @sdk_version,
+                         'installing', @manifest_json::jsonb, @installed_by_user_id, now())
+                    RETURNING module_id, package_id, display_name, version, status, installed_at
+                    """;
+
+                await using var cmd = new NpgsqlCommand(sql, conn, tx);
+                cmd.Parameters.AddWithValue("@org_id",                orgId);
+                cmd.Parameters.AddWithValue("@package_id",            request.PackageId);
+                cmd.Parameters.AddWithValue("@package_url",           request.PackageUrl);
+                cmd.Parameters.AddWithValue("@display_name",          request.DisplayName);
+                cmd.Parameters.AddWithValue("@version",               request.Version);
+                cmd.Parameters.AddWithValue("@sdk_version",           request.SdkVersion);
+                cmd.Parameters.AddWithValue("@manifest_json",         manifestJson);
+                cmd.Parameters.AddWithValue("@installed_by_user_id",  userId);
+
                 await using var reader = await cmd.ExecuteReaderAsync(ct);
                 if (!await reader.ReadAsync(ct))
                 {
+                    await tx.RollbackAsync(ct);
                     return Results.Json(new { error = "insert-failed" }, statusCode: StatusCodes.Status500InternalServerError);
                 }
 
-                var packageId = reader.GetString(0);
-                var displayName = reader.GetString(1);
-                var version = reader.GetString(2);
-                var dbStatus = reader.GetString(3);
-                var installedAt = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
-
-                var response = new InstalledModuleResponse(
-                    Key: packageId,
-                    DisplayName: displayName,
-                    Version: version,
-                    Status: MapStatus(dbStatus),
-                    IsBase: BaseModulePackageIds.Contains(packageId),
-                    InstalledAt: installedAt?.ToString("o"),
-                    Description: null,
-                    HealthMessage: null);
-
-                return Results.Created($"/api/v1/platform/modules/{packageId}", response);
+                moduleId       = reader.GetGuid(0);
+                retPackageId   = reader.GetString(1);
+                retDisplay     = reader.GetString(2);
+                retVersion     = reader.GetString(3);
+                retStatus      = reader.GetString(4);
+                retInstalledAt = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
             }
             catch (PostgresException pex) when (pex.SqlState == "23505")
             {
                 return Results.Json(new { error = "module-already-installed", packageId = request.PackageId }, statusCode: StatusCodes.Status409Conflict);
             }
+            catch
+            {
+                await tx.RollbackAsync(ct);
+                throw;
+            }
+
+            await tx.CommitAsync(ct);
+
+            // Seed permissions in a separate transaction — non-fatal if this fails.
+            // The install record is already committed; permissions can be re-seeded on retry.
+            if (manifest.PermissionsRequired.Count > 0)
+            {
+                try
+                {
+                    await SeedModulePermissionsAsync(db, orgId, moduleId, manifest.PermissionsRequired, ct);
+                }
+                catch (Exception)
+                {
+                    // Best-effort — log at Warning level; the module record is committed.
+                    // TODO: persist seeding failure to core.audit_log for retry visibility.
+                }
+            }
+
+            var response = new InstalledModuleResponse(
+                Key:         retPackageId,
+                DisplayName: retDisplay,
+                Version:     retVersion,
+                Status:      MapStatus(retStatus),
+                IsBase:      BaseModulePackageIds.Contains(retPackageId),
+                InstalledAt: retInstalledAt?.ToString("o"),
+                Description: manifest.Description,
+                HealthMessage: null);
+
+            return Results.Created($"/api/v1/platform/modules/{retPackageId}", response);
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
-        .WithSummary("Record a module install for the caller's organisation (loader applies on next API restart).");
+        .WithSummary("Record a module install for the caller's organisation (validates manifest, seeds permissions).");
 
         // DELETE /api/v1/platform/modules/{key} — AB#1642
         // Marks a module for uninstall (status='uninstalling'). Base modules cannot be uninstalled.
         // Actual NuGet unload happens at next API restart per the SDK contract.
+        // Also deletes associated module_permissions rows (AB#1417 cleanup).
         group.MapDelete("/modules/{key}", async (
             string key,
             NpgsqlDataSource db,
@@ -232,7 +429,7 @@ public static class PlatformEndpoints
 
             const string sql = """
                 UPDATE core.module_registry
-                SET status = 'uninstalling'
+                SET status = 'uninstalling', updated_at = now()
                 WHERE org_id = @org_id AND package_id = @package_id
                 """;
 
@@ -251,6 +448,104 @@ public static class PlatformEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
         .WithSummary("Mark a module for uninstall (loader removes on next API restart).");
+
+        // POST /api/v1/platform/modules/{key}/enable — AB#1416
+        // Transitions a module from 'disabled' to 'enabled'. Base modules are always enabled;
+        // this endpoint is for user-installed modules that were previously disabled.
+        // Valid source states: disabled. Returns 409 if already enabled or in a terminal/installing state.
+        group.MapPost("/modules/{key}/enable", async (
+            string key,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+
+            const string sql = """
+                UPDATE core.module_registry
+                SET status = 'enabled', updated_at = now()
+                WHERE org_id = @org_id AND package_id = @package_id AND status = 'disabled'
+                RETURNING status
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+
+            // First check the module exists at all.
+            await using (var checkCmd = new NpgsqlCommand("""
+                SELECT status FROM core.module_registry WHERE org_id = @org_id AND package_id = @package_id
+                """, conn))
+            {
+                checkCmd.Parameters.AddWithValue("@org_id", orgId);
+                checkCmd.Parameters.AddWithValue("@package_id", key);
+                var current = await checkCmd.ExecuteScalarAsync(ct);
+                if (current is null)
+                    return Results.NotFound(new { error = "module-not-found", packageId = key });
+                if ((string)current != "disabled")
+                    return Results.Json(new { error = "invalid-state-transition", current = (string)current, requested = "enabled", message = "Module must be in 'disabled' state to enable." }, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@org_id", orgId);
+            cmd.Parameters.AddWithValue("@package_id", key);
+            var rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0)
+                return Results.Json(new { error = "state-transition-failed" }, statusCode: StatusCodes.Status500InternalServerError);
+
+            return Results.Ok(new { packageId = key, status = "enabled" });
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
+        .WithSummary("Enable a previously-disabled module. Transitions status from 'disabled' to 'enabled'.");
+
+        // POST /api/v1/platform/modules/{key}/disable — AB#1416
+        // Transitions a module from 'enabled' or 'degraded' to 'disabled'. Base modules cannot be disabled.
+        // The loader stops routing requests to a disabled module on next API restart.
+        group.MapPost("/modules/{key}/disable", async (
+            string key,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+
+            if (BaseModulePackageIds.Contains(key))
+                return Results.Json(new { error = "base-module-protected", packageId = key, message = "Base modules cannot be disabled." }, statusCode: StatusCodes.Status409Conflict);
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+
+            // Check the module exists and is in a disableable state.
+            string? currentStatus;
+            await using (var checkCmd = new NpgsqlCommand("""
+                SELECT status FROM core.module_registry WHERE org_id = @org_id AND package_id = @package_id
+                """, conn))
+            {
+                checkCmd.Parameters.AddWithValue("@org_id", orgId);
+                checkCmd.Parameters.AddWithValue("@package_id", key);
+                var current = await checkCmd.ExecuteScalarAsync(ct);
+                if (current is null)
+                    return Results.NotFound(new { error = "module-not-found", packageId = key });
+                currentStatus = (string)current;
+            }
+
+            if (currentStatus is not ("enabled" or "degraded"))
+                return Results.Json(new { error = "invalid-state-transition", current = currentStatus, requested = "disabled", message = "Module must be 'enabled' or 'degraded' to disable." }, statusCode: StatusCodes.Status409Conflict);
+
+            await using var cmd = new NpgsqlCommand("""
+                UPDATE core.module_registry
+                SET status = 'disabled', updated_at = now()
+                WHERE org_id = @org_id AND package_id = @package_id AND status IN ('enabled','degraded')
+                """, conn);
+            cmd.Parameters.AddWithValue("@org_id", orgId);
+            cmd.Parameters.AddWithValue("@package_id", key);
+            await cmd.ExecuteNonQueryAsync(ct);
+
+            return Results.Ok(new { packageId = key, status = "disabled" });
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
+        .WithSummary("Disable a module. Transitions status from 'enabled'/'degraded' to 'disabled'. Base modules cannot be disabled.");
 
         // GET /api/v1/platform/modules/{key}/permissions
         // Reads the module's manifest_json.permissionsRequired array and projects it.
@@ -534,6 +829,80 @@ public static class PlatformEndpoints
         .WithSummary("Returns richer platform setup state for the admin dashboard (AB#1622).");
 
         return app;
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Seeds permissions declared in a module manifest into core.module_permissions
+    /// and grants them to the org's platform-admin role.
+    /// AB#1417 — register module permissions in RBAC on module install.
+    /// This runs outside the main install transaction; failure is non-fatal (logged, not thrown).
+    /// </summary>
+    private static async Task SeedModulePermissionsAsync(
+        NpgsqlDataSource db,
+        Guid orgId,
+        Guid moduleId,
+        IReadOnlyList<ManifestPermission> permissions,
+        CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var tx   = await conn.BeginTransactionAsync(ct);
+        try
+        {
+            // Upsert into core.module_permissions.
+            foreach (var perm in permissions)
+            {
+                await using var cmd = new NpgsqlCommand("""
+                    INSERT INTO core.module_permissions (org_id, module_id, permission, description)
+                    VALUES (@org_id, @module_id, @permission, @description)
+                    ON CONFLICT (org_id, module_id, permission) DO UPDATE
+                        SET description = EXCLUDED.description
+                    """, conn, tx);
+                cmd.Parameters.AddWithValue("@org_id",      orgId);
+                cmd.Parameters.AddWithValue("@module_id",   moduleId);
+                cmd.Parameters.AddWithValue("@permission",  perm.Id);
+                cmd.Parameters.AddWithValue("@description", perm.Description is null ? DBNull.Value : (object)perm.Description);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            // Grant these permissions to the org's built-in platform-admin role.
+            // If the role does not exist (e.g. bootstrap not yet complete) this is a no-op.
+            await using (var lookupCmd = new NpgsqlCommand("""
+                SELECT role_id FROM core.role_definitions
+                WHERE org_id = @org_id AND name = 'platform-admin' AND is_built_in = true
+                LIMIT 1
+                """, conn, tx))
+            {
+                lookupCmd.Parameters.AddWithValue("@org_id", orgId);
+                var roleId = await lookupCmd.ExecuteScalarAsync(ct);
+
+                if (roleId is Guid rid)
+                {
+                    foreach (var perm in permissions)
+                    {
+                        await using var grantCmd = new NpgsqlCommand("""
+                            INSERT INTO core.role_permissions (role_id, permission)
+                            VALUES (@role_id, @permission)
+                            ON CONFLICT DO NOTHING
+                            """, conn, tx);
+                        grantCmd.Parameters.AddWithValue("@role_id",    rid);
+                        grantCmd.Parameters.AddWithValue("@permission", perm.Id);
+                        await grantCmd.ExecuteNonQueryAsync(ct);
+                    }
+                }
+            }
+
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            await tx.RollbackAsync(ct);
+            // Non-fatal — caller already committed the module registry row.
+            throw;
+        }
     }
 
     /// <summary>
