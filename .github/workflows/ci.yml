@@ -37,11 +37,11 @@ jobs:
       # CVEs are visible in the GitHub Security tab via the SARIF upload.
       fail-on-critical: false
     secrets: inherit
-  # openapi:
-  #   needs: [build-test]
-  #   uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/openapi-publish.yml@v1.0.0
-  #   with:
-  #     module-name: cloudsmith-api
-  #     api-project-path: src/CloudSmith.Api
-  #     spec-route: /openapi/v1.json
-  #   secrets: inherit
+  openapi:
+    needs: [build-test]
+    uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/openapi-publish.yml@v1.0.0
+    with:
+      module-name: cloudsmith-api
+      api-project-path: src/CloudSmith.Api
+      spec-route: /openapi/v1.json
+    secrets: inherit
