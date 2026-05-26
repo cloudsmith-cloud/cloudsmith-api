@@ -186,6 +186,7 @@ app.MapSetupEndpoints();
 // API endpoints
 app.MapConfigEndpoints();
 app.MapClusterEndpoints();
+app.MapJobEndpoints();             // AB#1429 async job status + log
 app.MapInventoryEndpoints();
 app.MapPlatformEndpoints();   // AB#1640-1642 Modules (Platform Management group)
 app.MapIdentityProviderEndpoints();   // AB#1643-1647 Identity Providers CRUD
