@@ -45,7 +45,3 @@ jobs:
       api-project-path: src/CloudSmith.Api
       spec-route: /openapi/v1.json
     secrets: inherit
-    permissions:
-      contents: read
-      packages: read
-      pull-requests: write
