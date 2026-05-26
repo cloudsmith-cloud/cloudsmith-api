@@ -129,5 +129,8 @@ public sealed class SetupGateMiddleware
         || path.StartsWith("/api/v1/auth/callback", StringComparison.OrdinalIgnoreCase)
         || path.StartsWith("/signin-oidc", StringComparison.OrdinalIgnoreCase)
         || path.StartsWith("/health", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/openapi", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/swagger", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/scalar", StringComparison.OrdinalIgnoreCase)
         || path.Equals("/", StringComparison.Ordinal);
 }
