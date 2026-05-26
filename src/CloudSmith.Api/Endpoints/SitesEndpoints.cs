@@ -72,6 +72,42 @@ public static class SitesEndpoints
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("List sites for the caller's organisation.");
 
+        // GET /api/v1/platform/sites/{siteId} — get a single site.
+        group.MapGet("/{siteId:guid}", async (
+            Guid siteId,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            if (!TryGetOrgId(ctx, out var orgId, out var orgError))
+                return orgError!;
+
+            const string sql = """
+                SELECT site_id, name, description, location, created_at, updated_at
+                FROM core.sites
+                WHERE org_id = @org_id AND site_id = @site_id
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using var cmd  = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@org_id",  orgId);
+            cmd.Parameters.AddWithValue("@site_id", siteId);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+                return Results.NotFound(new { error = "site-not-found", siteId });
+
+            return Results.Ok(new SiteResponse(
+                SiteId:      reader.GetGuid(0),
+                Name:        reader.GetString(1),
+                Description: reader.IsDBNull(2) ? null : reader.GetString(2),
+                Location:    reader.IsDBNull(3) ? null : reader.GetString(3),
+                CreatedAt:   reader.GetDateTime(4).ToString("o"),
+                UpdatedAt:   reader.GetDateTime(5).ToString("o")));
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
+        .WithSummary("Get a single site by ID.");
+
         // POST /api/v1/platform/sites — create a site.
         group.MapPost("/", async (
             CreateSiteRequest request,

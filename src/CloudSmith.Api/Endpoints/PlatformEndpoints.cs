@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Data;
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using CloudSmith.Api.Authorization;
+using CloudSmith.Api.Relay;
 using CloudSmith.Core.Setup;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -827,6 +829,93 @@ public static class PlatformEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("Returns richer platform setup state for the admin dashboard (AB#1622).");
+
+        // GET /api/v1/platform/health — per-component control-plane health board.
+        // Returns API server, PostgreSQL, active relay agents, and identity provider status.
+        // Portal screen 17 reads this endpoint. Falls back gracefully when components are unknown.
+        group.MapGet("/health", async (
+            NpgsqlDataSource db,
+            IConnectedRelayRegistry relayRegistry,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+
+            var components = new List<object>();
+            var checkedAt = DateTimeOffset.UtcNow.ToString("o");
+            var overallHealthy = true;
+
+            // API Server — trivially healthy if we're here.
+            components.Add(new
+            {
+                name        = "API Server",
+                status      = "healthy",
+                detail      = "Responding",
+                latencyMs   = (int?)null,
+                lastChecked = checkedAt,
+            });
+
+            // PostgreSQL — quick connectivity probe.
+            string dbStatus   = "unknown";
+            string? dbDetail  = null;
+            int?    dbLatency = null;
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                await using var conn = await db.OpenConnectionAsync(ct);
+                await using var cmd  = new NpgsqlCommand("SELECT 1", conn);
+                await cmd.ExecuteScalarAsync(ct);
+                sw.Stop();
+                dbStatus  = "healthy";
+                dbDetail  = "Connected";
+                dbLatency = (int)sw.ElapsedMilliseconds;
+            }
+            catch (Exception ex)
+            {
+                dbStatus       = "unhealthy";
+                dbDetail       = ex.Message.Length > 120 ? ex.Message[..120] : ex.Message;
+                overallHealthy = false;
+            }
+            components.Add(new { name = "PostgreSQL", status = dbStatus, detail = dbDetail, latencyMs = dbLatency, lastChecked = checkedAt });
+
+            // Relay Agent — count active WebSocket connections in memory.
+            var connectedRelays = relayRegistry.ConnectedRelayIds.Count;
+            string relayStatus = connectedRelays > 0 ? "healthy" : "degraded";
+            string relayDetail = connectedRelays > 0
+                ? $"{connectedRelays} relay{(connectedRelays == 1 ? "" : "s")} connected"
+                : "No relays connected — on-prem data is not flowing";
+            if (connectedRelays == 0) overallHealthy = false;
+            components.Add(new { name = "Relay Agent", status = relayStatus, detail = relayDetail, latencyMs = (int?)null, lastChecked = checkedAt });
+
+            // Identity Provider — check if any IdP rows exist in DB; status based on enabled count.
+            string idpStatus = "unknown";
+            string? idpDetail = null;
+            try
+            {
+                const string idpSql = """
+                    SELECT COUNT(*) FROM core.identity_providers WHERE org_id = @org_id AND enabled = true
+                    """;
+                await using var conn = await db.OpenConnectionAsync(ct);
+                await using var cmd  = new NpgsqlCommand(idpSql, conn);
+                cmd.Parameters.AddWithValue("@org_id", orgId);
+                var count = (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+                idpStatus = count > 0 ? "healthy" : "unknown";
+                idpDetail = count > 0 ? $"{count} provider{(count == 1 ? "" : "s")} enabled" : "No identity providers configured (local auth only)";
+            }
+            catch
+            {
+                idpStatus = "unknown";
+                idpDetail = "Could not query identity providers";
+            }
+            components.Add(new { name = "Identity Provider", status = idpStatus, detail = idpDetail, latencyMs = (int?)null, lastChecked = checkedAt });
+
+            var overallStr = overallHealthy ? "healthy" : "degraded";
+            return Results.Ok(new { overallStatus = overallStr, components });
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
+        .WithSummary("Per-component control-plane health board (API server, PostgreSQL, relay agents, identity providers).");
 
         return app;
     }
