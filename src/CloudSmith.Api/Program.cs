@@ -194,6 +194,7 @@ app.MapAuditEndpoints();              // AB#1651 Audit log query
 app.MapSitesEndpoints();              // AB#1652 Sites CRUD
 app.MapSecretsEndpoints();            // AB#1653 Secrets refs CRUD
 app.MapRelayEndpoints();              // AB#1670 Relay bridge — enrollment, clusters POST, inventory ingest, health probe
+app.MapPermissionsEndpoints();        // AB#1422 /auth/v1/me/permissions — caller's effective permission set
 
 // SignalR PlatformHub — real-time events for portal and runners (AB#1436).
 // Requires JWT Bearer or cookie auth (handled by ASP.NET Core middleware).

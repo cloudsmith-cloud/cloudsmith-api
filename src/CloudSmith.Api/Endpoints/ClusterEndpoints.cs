@@ -1,9 +1,12 @@
 // Copyright 2026 CloudSmith Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+using CloudSmith.Api.Hubs;
 using CloudSmith.ClusterMgmt.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.SignalR;
+using Npgsql;
 
 namespace CloudSmith.Api.Endpoints;
 
@@ -37,6 +40,74 @@ public static class ClusterEndpoints
             if (!TryGetOrgId(ctx, out var orgId)) return Results.Unauthorized();
             var nodes = await svc.ListNodesAsync(id, orgId, ct);
             return Results.Ok(nodes);
+        });
+
+        // GET /api/v1/clusters/{id}/health — aggregated health rollup for all nodes in cluster.
+        // Pushes the same snapshot to the cluster SignalR group so connected portal clients
+        // receive a real-time update on every poll. (AB#1480)
+        clusters.MapGet("/{id:guid}/health", async (
+            Guid id,
+            HttpContext ctx,
+            INodeService nodeSvc,
+            NpgsqlDataSource db,
+            IHubContext<PlatformHub> hub,
+            CancellationToken ct) =>
+        {
+            if (!TryGetOrgId(ctx, out var orgId)) return Results.Unauthorized();
+
+            // Aggregate health from cluster_mgmt.nodes for the given cluster.
+            const string sql = """
+                SELECT
+                    COUNT(*)                                        AS total,
+                    COUNT(*) FILTER (WHERE status = 'online')      AS online,
+                    COUNT(*) FILTER (WHERE status = 'offline')     AS offline,
+                    COUNT(*) FILTER (WHERE status = 'degraded')    AS degraded,
+                    COUNT(*) FILTER (WHERE status = 'maintenance') AS maintenance
+                FROM cluster_mgmt.nodes
+                WHERE cluster_id = @cluster_id
+                  AND org_id     = @org_id
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using var cmd  = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@cluster_id", id);
+            cmd.Parameters.AddWithValue("@org_id",     orgId);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+                return Results.NotFound(new { error = "cluster-not-found" });
+
+            var total       = reader.GetInt64(0);
+            var online      = reader.GetInt64(1);
+            var offline     = reader.GetInt64(2);
+            var degraded    = reader.GetInt64(3);
+            var maintenance = reader.GetInt64(4);
+
+            // Overall status: healthy if all online; degraded if any degraded/offline; maintenance if any in maintenance.
+            var overallStatus = total == 0   ? "unknown"
+                : degraded > 0 || offline > 0 ? "degraded"
+                : maintenance > 0              ? "maintenance"
+                :                               "healthy";
+
+            var snapshot = new
+            {
+                clusterId   = id,
+                status      = overallStatus,
+                totalNodes  = total,
+                online,
+                offline,
+                degraded,
+                maintenance,
+                asOf        = DateTimeOffset.UtcNow,
+            };
+
+            // Push to cluster SignalR group so portal receives real-time health update.
+            await hub.Clients
+                .Group(PlatformHub.ClusterGroup(id.ToString()))
+                .SendAsync("HealthUpdated", id.ToString(), snapshot, ct)
+                .ConfigureAwait(false);
+
+            return Results.Ok(snapshot);
         });
 
         return app;
