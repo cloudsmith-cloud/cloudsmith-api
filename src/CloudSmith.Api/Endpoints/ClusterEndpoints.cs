@@ -1,8 +1,11 @@
 // Copyright 2026 CloudSmith Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+using System.Security.Claims;
+using System.Text.Json;
 using CloudSmith.Api.Hubs;
 using CloudSmith.ClusterMgmt.Services;
+using CloudSmith.Core.Jobs;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.SignalR;
@@ -29,6 +32,47 @@ public static class ClusterEndpoints
             var cluster = await svc.GetClusterAsync(id, orgId, ct);
             return cluster is null ? Results.NotFound() : Results.Ok(cluster);
         });
+
+        // POST /api/v1/clusters/{id}/nodes — dispatch a runner job to provision a node (AB#1482).
+        // Creates a job in core.jobs with job_type = 'provision-node'. The relay picks up
+        // the job via GET /lan/v1/agents/{agentId}/jobs and delivers it to the agent.
+        clusters.MapPost("/{id:guid}/nodes", async (
+            Guid id,
+            HttpContext ctx,
+            IJobService jobSvc,
+            ProvisionNodeRequest body,
+            CancellationToken ct) =>
+        {
+            if (!TryGetOrgId(ctx, out var orgId)) return Results.Unauthorized();
+            if (!TryGetUserId(ctx, out var userId))  return Results.Unauthorized();
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                clusterId  = id,
+                nodeHostname = body.NodeHostname,
+                ipAddress  = body.IpAddress,
+                relayId    = body.RelayId,
+            });
+
+            var job = await jobSvc.CreateJobAsync(orgId, new CreateJobRequest(
+                Module:          "cloudsmith-cluster-mgmt",
+                Operation:       "provision-node",
+                PayloadJson:     payload,
+                CreatedByUserId: userId,
+                RunnerId:        null,
+                ModuleId:        null), ct);
+
+            return Results.Accepted($"/api/v1/jobs/{job.JobId}", new
+            {
+                jobId     = job.JobId,
+                clusterId = id,
+                status    = "Queued",
+                statusUrl = $"/api/v1/jobs/{job.JobId}",
+            });
+        })
+        .RequireAuthorization()
+        .WithTags("Clusters")
+        .WithSummary("Dispatch a runner job to provision a node and add it to the cluster.");
 
         // POST /api/v1/clusters has moved to RelayEndpoints.MapRelayEndpoints — the
         // bridge-aware version supports clusterType + relayId (AB#1670). The route
@@ -119,4 +163,19 @@ public static class ClusterEndpoints
         orgId = default;
         return false;
     }
+
+    private static bool TryGetUserId(HttpContext ctx, out Guid userId)
+    {
+        if (ctx.Items["UserId"] is Guid id) { userId = id; return true; }
+        var raw = ctx.User.FindFirstValue("sub") ?? ctx.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (Guid.TryParse(raw, out userId)) return true;
+        userId = default;
+        return false;
+    }
 }
+
+/// <summary>Request body for POST /clusters/{id}/nodes.</summary>
+public sealed record ProvisionNodeRequest(
+    string  NodeHostname,
+    string? IpAddress,
+    Guid?   RelayId);

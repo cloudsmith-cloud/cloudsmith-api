@@ -5,6 +5,7 @@ using System.Data;
 using System.Security.Claims;
 using System.Text.Json;
 using CloudSmith.Api.Authorization;
+using CloudSmith.Core.Setup;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -476,6 +477,61 @@ public static class PlatformEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("Module health probe results (MVP stub — real probing is a follow-up).");
+
+        // GET /api/v1/platform/setup-status — authenticated setup status for admin dashboard (AB#1622).
+        // Returns richer state than the anonymous /api/v1/setup/status endpoint, including
+        // completedAt, completedByUserId, timezone, and public URL.
+        group.MapGet("/setup-status", async (
+            SetupService setup,
+            NpgsqlDataSource db,
+            CancellationToken ct) =>
+        {
+            const string sql = """
+                SELECT setup_state, platform_name, public_url, timezone,
+                       completed_at, completed_by_user_id
+                FROM core.platform_setup
+                WHERE id = true
+                LIMIT 1
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using var cmd  = new NpgsqlCommand(sql, conn);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            if (!await reader.ReadAsync(ct))
+            {
+                return Results.Ok(new
+                {
+                    setupComplete       = false,
+                    setupState          = "Pending",
+                    platformName        = (string?)null,
+                    publicUrl           = (string?)null,
+                    timezone            = (string?)null,
+                    completedAt         = (DateTimeOffset?)null,
+                    completedByUserId   = (Guid?)null,
+                });
+            }
+
+            var state            = reader.GetString(0);
+            var platformName     = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var publicUrl        = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var timezone         = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var completedAt      = reader.IsDBNull(4) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(4);
+            var completedByUser  = reader.IsDBNull(5) ? (Guid?)null : reader.GetGuid(5);
+
+            return Results.Ok(new
+            {
+                setupComplete       = state == "Completed",
+                setupState          = state,
+                platformName,
+                publicUrl,
+                timezone,
+                completedAt,
+                completedByUserId   = completedByUser,
+            });
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
+        .WithSummary("Returns richer platform setup state for the admin dashboard (AB#1622).");
 
         return app;
     }
