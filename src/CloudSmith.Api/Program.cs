@@ -13,6 +13,7 @@ using CloudSmith.ClusterMgmt;
 using CloudSmith.ClusterMgmt.Services;
 using CloudSmith.Core.Hosting;
 using CloudSmith.Identity;
+using CloudSmith.Identity.Users;
 using CloudSmith.Inventory;
 using CloudSmith.Inventory.Services;
 using CloudSmith.Monitoring;
@@ -52,6 +53,8 @@ builder.Services.AddCloudSmithCore(connectionString);
 
 // Identity — Cookie + OIDC (browser) + JWT Bearer (runners/API-to-API)
 builder.Services.AddCloudSmithIdentity(builder.Configuration);
+// User service — registered separately so it can resolve NpgsqlDataSource from DI (AB#1468)
+builder.Services.AddScoped<CloudSmith.Identity.Users.IUserService, CloudSmith.Identity.Users.PostgresUserService>();
 
 // Cluster management — register services directly; FM migrations run in isolated scope below
 builder.Services.AddScoped<IClusterService, PostgresClusterService>();
@@ -179,6 +182,8 @@ app.MapHealthEndpoints();
 
 // Auth endpoints (login / logout / me)
 app.MapAuthEndpoints();
+// User CRUD endpoints from identity module — GET/POST/PATCH/DELETE /api/v1/users (AB#1468)
+app.MapUserEndpoints();
 
 // ADR-047 first-run setup + local login endpoints (anonymous)
 app.MapSetupEndpoints();
