@@ -209,7 +209,11 @@ app.MapPermissionsEndpoints();        // AB#1422 /auth/v1/me/permissions — cal
 app.MapHub<PlatformHub>("/hubs/platform");
 
 // OpenAPI / Scalar docs
+// Primary endpoint: /openapi/v1.json (ASP.NET Core 9 default)
 app.MapOpenApi();
+// Swagger-compat alias: /swagger/v1/swagger.json — AB#1440
+// Allows tooling that expects the Swashbuckle path to resolve the spec.
+app.MapOpenApi("/swagger/v1/swagger.json");
 app.MapScalarApiReference();
 
 app.Run();
