@@ -1,10 +1,14 @@
 // Copyright 2026 CloudSmith Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+using Asp.Versioning;
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Endpoints;
+using CloudSmith.Api.Hubs;
 using CloudSmith.Api.Relay;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using CloudSmith.ClusterMgmt;
 using CloudSmith.ClusterMgmt.Services;
 using CloudSmith.Core.Hosting;
@@ -67,6 +71,60 @@ builder.Services.AddCloudSmithMonitoring(opts =>
 builder.Services.AddCloudSmithAuthorization();
 builder.Services.AddOpenApi();
 
+// SignalR — PlatformHub for real-time portal and runner events (AB#1436).
+// JWT auth is handled by the ASP.NET Core auth middleware (same pipeline as REST);
+// SignalR also supports query-string token for browser WebSocket connections.
+builder.Services.AddSignalR(opts =>
+{
+    opts.EnableDetailedErrors = builder.Environment.IsDevelopment();
+    opts.HandshakeTimeout    = TimeSpan.FromSeconds(15);
+    opts.KeepAliveInterval   = TimeSpan.FromSeconds(15);
+    opts.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+});
+
+// API versioning — api-version header + deprecated-version warning (AB#1439).
+// Version format: Major.Minor. Default = 1.0. Deprecated versions return a
+// "api-deprecated-version" response header warning callers to upgrade.
+builder.Services.AddApiVersioning(opts =>
+{
+    opts.DefaultApiVersion               = new ApiVersion(1, 0);
+    opts.AssumeDefaultVersionWhenUnspecified = true;
+    opts.ApiVersionReader               = new HeaderApiVersionReader("api-version");
+    opts.ReportApiVersions              = true; // emits "api-supported-versions" + "api-deprecated-versions" headers
+});
+
+// Rate limiting — fixed-window per-IP per minute. Protects all API endpoints
+// from abuse while still allowing normal portal + runner traffic (AB#1437).
+// Limits: 120 requests/minute per IP. Auth endpoints have a stricter 20/minute limit.
+builder.Services.AddRateLimiter(opts =>
+{
+    opts.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Default policy: 120 req/min per IP.
+    opts.AddPolicy("default-limit", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit          = 120,
+                Window               = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit           = 0,
+            }));
+
+    // Auth policy: 20 req/min per IP — prevents password spray.
+    opts.AddPolicy("auth-limit", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit          = 20,
+                Window               = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit           = 0,
+            }));
+});
+
 // Relay WebSocket hub — in-memory registry of connected relay sockets (AB#1679)
 builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>();
 
@@ -95,6 +153,9 @@ app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(60),
 });
+
+// Rate limiting — must come before routing so the middleware fires on all matched routes.
+app.UseRateLimiter();
 
 // Middleware (auth must come after routing, before endpoints)
 app.UseMiddleware<CorrelationIdMiddleware>();
@@ -133,6 +194,11 @@ app.MapAuditEndpoints();              // AB#1651 Audit log query
 app.MapSitesEndpoints();              // AB#1652 Sites CRUD
 app.MapSecretsEndpoints();            // AB#1653 Secrets refs CRUD
 app.MapRelayEndpoints();              // AB#1670 Relay bridge — enrollment, clusters POST, inventory ingest, health probe
+
+// SignalR PlatformHub — real-time events for portal and runners (AB#1436).
+// Requires JWT Bearer or cookie auth (handled by ASP.NET Core middleware).
+// Browser WebSocket auth: pass access_token query param (SignalR convention).
+app.MapHub<PlatformHub>("/hubs/platform");
 
 // OpenAPI / Scalar docs
 app.MapOpenApi();
