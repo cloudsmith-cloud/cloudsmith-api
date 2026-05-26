@@ -135,9 +135,13 @@ builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>()
 
 var app = builder.Build();
 
-// Run all module migrations on startup using isolated scopes to avoid FM runner conflicts
-app.Services.MigrateCloudSmithDatabase();
-MigrateAllDatabases(connectionString);
+// Run all module migrations on startup using isolated scopes to avoid FM runner conflicts.
+// CLOUDSMITH_SKIP_MIGRATIONS skips this in environments without a live DB (e.g. OpenAPI spec gen in CI).
+if (!string.Equals(Environment.GetEnvironmentVariable("CLOUDSMITH_SKIP_MIGRATIONS"), "true", StringComparison.OrdinalIgnoreCase))
+{
+    app.Services.MigrateCloudSmithDatabase();
+    MigrateAllDatabases(connectionString);
+}
 
 // Trust X-Forwarded-* headers from nginx reverse proxy.
 // KnownNetworks/KnownProxies default to loopback only; the portal nginx runs in a
