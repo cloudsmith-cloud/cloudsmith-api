@@ -1,0 +1,17 @@
+name: Release
+# Triggers on v*.*.* tags — builds multi-arch image, cosign signs, promotes :latest (AB#1604)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+jobs:
+  release-image:
+    uses: cloudsmith-cloud/cloudsmith-workflows/.github/workflows/docker-release.yml@main
+    with:
+      image-name: cloudsmith-api
+      update-aca: false
+    secrets: inherit
