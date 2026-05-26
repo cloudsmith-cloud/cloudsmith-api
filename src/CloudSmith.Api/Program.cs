@@ -13,6 +13,7 @@ using CloudSmith.ClusterMgmt;
 using CloudSmith.ClusterMgmt.Services;
 using CloudSmith.Core.Hosting;
 using CloudSmith.Identity;
+using CloudSmith.Identity.Groups;
 using CloudSmith.Identity.Users;
 using CloudSmith.Inventory;
 using CloudSmith.Inventory.Services;
@@ -53,8 +54,9 @@ builder.Services.AddCloudSmithCore(connectionString);
 
 // Identity — Cookie + OIDC (browser) + JWT Bearer (runners/API-to-API)
 builder.Services.AddCloudSmithIdentity(builder.Configuration);
-// User service — registered separately so it can resolve NpgsqlDataSource from DI (AB#1468)
+// User and Group services — registered separately so they can resolve NpgsqlDataSource from DI.
 builder.Services.AddScoped<CloudSmith.Identity.Users.IUserService, CloudSmith.Identity.Users.PostgresUserService>();
+builder.Services.AddScoped<IGroupService, PostgresGroupService>();  // AB#1469
 
 // Cluster management — register services directly; FM migrations run in isolated scope below
 builder.Services.AddScoped<IClusterService, PostgresClusterService>();
@@ -195,6 +197,7 @@ app.MapJobEndpoints();             // AB#1429 async job status + log
 app.MapInventoryEndpoints();
 app.MapPlatformEndpoints();   // AB#1640-1642 Modules (Platform Management group)
 app.MapIdentityProviderEndpoints();   // AB#1643-1647 Identity Providers CRUD
+app.MapGroupEndpoints();              // AB#1469 Group CRUD + membership + role mapping
 app.MapUsersEndpoints();              // AB#1648-1649 Users + invite
 app.MapAuditEndpoints();              // AB#1651 Audit log query
 app.MapSitesEndpoints();              // AB#1652 Sites CRUD
