@@ -153,8 +153,8 @@ public static class HardwareCatalogEndpoints
             if (string.IsNullOrWhiteSpace(req.Name))
                 return Results.BadRequest(new { error = "name-required" });
 
-            var componentsJson = req.Components is { ValueKind: not JsonValueKind.Undefined }
-                ? req.Components.GetRawText() : "[]";
+            var componentsJson = req.Components is { ValueKind: not JsonValueKind.Undefined } c
+                ? c.GetRawText() : "[]";
 
             const string sql = """
                 INSERT INTO inventory.hardware_catalog_profiles
