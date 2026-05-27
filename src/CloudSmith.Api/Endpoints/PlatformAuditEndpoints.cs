@@ -35,7 +35,7 @@ public static class PlatformAuditEndpoints
         // POST /api/v1/platform/audit
         // Accepts a portal-originated audit event and appends it to core.audit_log.
         // The portal sends this fire-and-forget; we return 202 immediately regardless of DB outcome.
-        group.MapPost("/audit", async (
+        group.MapPost("/audit", (
             PlatformAuditEventRequest req,
             NpgsqlDataSource db,
             HttpContext ctx,
