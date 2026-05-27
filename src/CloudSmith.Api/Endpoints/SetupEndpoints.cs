@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Security.Claims;
+using CloudSmith.Api.Services;
 using CloudSmith.Core.Setup;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Routing;
 
 namespace CloudSmith.Api.Endpoints;
@@ -15,12 +17,22 @@ namespace CloudSmith.Api.Endpoints;
 /// ADR-047 — first-run setup + local (break-glass) login endpoints. All anonymous:
 /// they are reachable before any IdP or admin exists. Once setup is complete,
 /// <c>POST /api/v1/setup</c> is permanently locked (409).
+/// C2 security fix: token TTL enforced (410 Gone on expired token) and setup endpoint
+/// is rate-limited at 5 attempts per 15 minutes per IP.
 /// </summary>
 public static class SetupEndpoints
 {
+    /// <summary>Rate limiter policy name for <c>POST /api/v1/setup</c> (C2 security fix).</summary>
+    public const string SetupRateLimitPolicy = "setup-limit";
+
     public sealed record CompleteSetupRequest(
         string PlatformName, string PublicUrl, string AdminUsername,
-        string? AdminEmail, string AdminPassword, string? Timezone);
+        string? AdminEmail, string AdminPassword, string? Timezone,
+        /// <summary>
+        /// One-time initial admin token written to the secrets file on first boot.
+        /// Required — rejected with 401 if absent, 410 if expired, 401 if invalid.
+        /// </summary>
+        string? InitialAdminToken);
 
     public sealed record LocalLoginRequest(string Username, string Password);
 
@@ -34,13 +46,45 @@ public static class SetupEndpoints
         });
 
         // Anonymous — performs first-run setup once; 409 if already complete.
-        app.MapPost("/api/v1/setup", async (CompleteSetupRequest req, SetupService setup, CancellationToken ct) =>
+        // C2: rate-limited (5 attempts per 15 min per IP) and validates the initial admin token.
+        app.MapPost("/api/v1/setup", async (
+            CompleteSetupRequest req,
+            SetupService setup,
+            MasterSecretsKeyBootstrap bootstrap,
+            CancellationToken ct) =>
         {
+            // Validate the one-time initial admin token (C2 — enforces TTL).
+            if (string.IsNullOrWhiteSpace(req.InitialAdminToken))
+            {
+                return Results.Json(
+                    new { error = "token-required", message = "A valid initial admin token is required to complete setup." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            var tokenResult = await bootstrap.ValidateInitialAdminTokenAsync(req.InitialAdminToken, ct);
+            switch (tokenResult)
+            {
+                case TokenValidationResult.Expired:
+                    return Results.Json(
+                        new { error = "token-expired", message = "The initial admin token has expired (30-minute TTL). Restart the CloudSmith service to generate a new token." },
+                        statusCode: StatusCodes.Status410Gone);
+
+                case TokenValidationResult.NotFound:
+                case TokenValidationResult.Invalid:
+                    return Results.Json(
+                        new { error = "token-invalid", message = "The initial admin token is invalid." },
+                        statusCode: StatusCodes.Status401Unauthorized);
+            }
+
             try
             {
                 await setup.CompleteSetupAsync(
                     req.PlatformName, req.PublicUrl, req.AdminUsername,
                     req.AdminEmail ?? string.Empty, req.AdminPassword, req.Timezone, ct);
+
+                // Revoke the one-time token now that setup is complete.
+                await bootstrap.RevokeInitialAdminTokenAsync(ct);
+
                 return Results.Ok(new { setupComplete = true });
             }
             catch (InvalidOperationException ex)
@@ -51,7 +95,8 @@ public static class SetupEndpoints
             {
                 return Results.BadRequest(new { error = "invalid-setup-request", message = ex.Message });
             }
-        });
+        })
+        .RequireRateLimiting(SetupRateLimitPolicy);
 
         // Anonymous — local (break-glass) login. Verifies the credential and issues the
         // same cookie session the OIDC path uses, so /api/v1/auth/me works identically.

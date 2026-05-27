@@ -151,14 +151,29 @@ builder.Services.AddRateLimiter(opts =>
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 QueueLimit           = 0,
             }));
+
+    // Setup policy (C2 security fix): max 5 attempts per 15 min per IP — prevents
+    // brute-force guessing of the initial admin token before first-run completes.
+    opts.AddPolicy(CloudSmith.Api.Endpoints.SetupEndpoints.SetupRateLimitPolicy, ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit          = 5,
+                Window               = TimeSpan.FromMinutes(15),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit           = 0,
+            }));
 });
 
 // Relay WebSocket hub — in-memory registry of connected relay sockets (AB#1679)
 builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>();
 
-// AB#1591 — First-startup bootstrap: generate master secrets key + print initial admin token.
-// Runs as IHostedService before the app starts accepting requests.
-builder.Services.AddHostedService<MasterSecretsKeyBootstrap>();
+// AB#1591 — First-startup bootstrap: generate master secrets key + write initial admin token.
+// Registered as a singleton so SetupEndpoints can inject it for token validation (C2 security fix).
+// AddHostedService with a factory resolves the same singleton instance for IHostedService.
+builder.Services.AddSingleton<MasterSecretsKeyBootstrap>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MasterSecretsKeyBootstrap>());
 
 var app = builder.Build();
 
