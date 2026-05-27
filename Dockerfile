@@ -12,10 +12,11 @@ RUN dotnet publish src/CloudSmith.Api/CloudSmith.Api.csproj -c Release -o /app/p
 
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
+# Install curl for healthcheck — dotnet/aspnet:9.0 (Debian Bookworm) does not include it
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 EXPOSE 8080
 ENV ASPNETCORE_URLS=http://+:8080
-# dotnet/aspnet:9.0 (Debian Bookworm) has no curl/wget — use bash /dev/tcp
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD bash -c "(echo > /dev/tcp/localhost/8080) 2>/dev/null || exit 1"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
+  CMD curl -sf http://localhost:8080/health/live || exit 1
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "CloudSmith.Api.dll"]
