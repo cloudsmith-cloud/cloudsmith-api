@@ -98,7 +98,7 @@ public sealed class PlatformHub : Hub
         // Ownership check: verify the cluster belongs to the caller's org.
         await using var conn = await _db.OpenConnectionAsync(Context.ConnectionAborted);
         await using var cmd = new NpgsqlCommand("""
-            SELECT 1 FROM core.clusters WHERE id = @id AND org_id = @org_id LIMIT 1
+            SELECT 1 FROM cluster_mgmt.clusters WHERE cluster_id = @id AND org_id = @org_id LIMIT 1
             """, conn);
         cmd.Parameters.Add(new NpgsqlParameter("@id", NpgsqlDbType.Uuid) { Value = clusterGuid });
         cmd.Parameters.Add(new NpgsqlParameter("@org_id", NpgsqlDbType.Uuid) { Value = orgId.Value });

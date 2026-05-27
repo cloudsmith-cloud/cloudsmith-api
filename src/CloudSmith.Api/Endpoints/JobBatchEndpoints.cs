@@ -98,7 +98,7 @@ public static class JobBatchEndpoints
                 }
 
                 await using var ownerCmd = new NpgsqlCommand("""
-                    SELECT 1 FROM core.clusters WHERE id = @id AND org_id = @org_id LIMIT 1
+                    SELECT 1 FROM cluster_mgmt.clusters WHERE cluster_id = @id AND org_id = @org_id LIMIT 1
                     """, conn);
                 ownerCmd.Parameters.Add(new NpgsqlParameter("@id", NpgsqlDbType.Uuid) { Value = resourceGuid });
                 ownerCmd.Parameters.Add(new NpgsqlParameter("@org_id", NpgsqlDbType.Uuid) { Value = orgId });
