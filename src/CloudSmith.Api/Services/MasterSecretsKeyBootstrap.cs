@@ -63,6 +63,17 @@ public sealed class MasterSecretsKeyBootstrap : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // CLOUDSMITH_SKIP_MIGRATIONS=true signals a no-DB environment (e.g. OpenAPI spec generation
+        // in CI). Skip all DB operations to allow the app to start without a PostgreSQL connection.
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("CLOUDSMITH_SKIP_MIGRATIONS"),
+                "true",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("MasterSecretsKeyBootstrap: skipping startup (CLOUDSMITH_SKIP_MIGRATIONS=true).");
+            return;
+        }
+
         await EnsureMasterSecretsKeyAsync(cancellationToken);
         await EnsureInitialAdminTokenAsync(cancellationToken);
     }
