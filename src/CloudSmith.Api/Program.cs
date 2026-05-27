@@ -71,9 +71,27 @@ else
 }
 
 // Platform kernel (migrations + RBAC + Config + health + NpgsqlDataSource)
-var connectionString = builder.Configuration.GetConnectionString("Default")
-    ?? builder.Configuration.GetConnectionString("CloudSmith")
-    ?? throw new InvalidOperationException("CS-CORE-ERR-001: Required configuration 'ConnectionStrings:Default' is missing");
+// AB#1600 — PaaS mode: ConnectionStrings:Default may be set to just the password (KV secret ref)
+// when the full connection string is assembled from individual env vars. Detect this pattern
+// and build a proper Npgsql connection string if the value doesn't look like a full conn string.
+static string ResolveConnectionString(Microsoft.Extensions.Configuration.IConfiguration cfg)
+{
+    var raw = cfg.GetConnectionString("Default") ?? cfg.GetConnectionString("CloudSmith");
+    if (raw is null)
+        throw new InvalidOperationException("CS-CORE-ERR-001: Required configuration 'ConnectionStrings:Default' is missing");
+
+    // If the value looks like a full Npgsql connection string (contains Host= or ;), use as-is.
+    if (raw.Contains('=') || raw.Contains(';'))
+        return raw;
+
+    // Otherwise treat raw as just the password and assemble from separate env vars.
+    // This happens in PaaS mode where ConnectionStrings__Default = KV pg-password secret.
+    var host     = cfg["ConnectionStrings:DefaultHost"]     ?? "localhost";
+    var database = cfg["ConnectionStrings:DefaultDatabase"] ?? "cloudsmith";
+    var user     = cfg["ConnectionStrings:DefaultUser"]     ?? "cloudsmith";
+    return $"Host={host};Database={database};Username={user};Password={raw};SSL Mode=Require;Trust Server Certificate=true";
+}
+var connectionString = ResolveConnectionString(builder.Configuration);
 builder.Services.AddCloudSmithCore(connectionString);
 
 // Identity — Cookie + OIDC (browser) + JWT Bearer (runners/API-to-API)
