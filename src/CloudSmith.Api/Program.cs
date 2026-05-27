@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using Asp.Versioning;
+using CloudSmith.Api;
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Endpoints;
 using CloudSmith.Api.Hubs;
