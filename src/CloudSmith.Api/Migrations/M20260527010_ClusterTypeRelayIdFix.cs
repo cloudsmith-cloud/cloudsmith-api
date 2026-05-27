@@ -17,20 +17,50 @@ public sealed class M20260527010_ClusterTypeRelayIdFix : Migration
 {
     public override void Up()
     {
+        // Guard: this corrective migration is a no-op on fresh deployments where
+        // cluster_mgmt.clusters does not yet exist (it will be created by the
+        // CloudSmith.ClusterMgmt package migrations that run after the API migrations).
+        // On environments with a pre-existing partial schema, this adds the missing columns.
         Execute.Sql("""
-            ALTER TABLE cluster_mgmt.clusters
-                ADD COLUMN IF NOT EXISTS cluster_type text
-                    CHECK (cluster_type IN ('HyperV','AzureLocal','WSFC'));
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'cluster_mgmt'
+                    AND table_name = 'clusters'
+                ) THEN
+                    -- Add cluster_type column if missing
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'cluster_mgmt'
+                        AND table_name = 'clusters'
+                        AND column_name = 'cluster_type'
+                    ) THEN
+                        ALTER TABLE cluster_mgmt.clusters
+                            ADD COLUMN cluster_type text
+                                CHECK (cluster_type IN ('HyperV','AzureLocal','WSFC'));
+                    END IF;
 
-            ALTER TABLE cluster_mgmt.clusters
-                ADD COLUMN IF NOT EXISTS relay_id uuid
-                    REFERENCES core.relays (relay_id) ON DELETE SET NULL;
+                    -- Add relay_id column if missing
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'cluster_mgmt'
+                        AND table_name = 'clusters'
+                        AND column_name = 'relay_id'
+                    ) THEN
+                        ALTER TABLE cluster_mgmt.clusters
+                            ADD COLUMN relay_id uuid
+                                REFERENCES core.relays (relay_id) ON DELETE SET NULL;
+                        CREATE INDEX IF NOT EXISTS idx_clusters_relay_id
+                            ON cluster_mgmt.clusters (relay_id)
+                            WHERE relay_id IS NOT NULL;
+                    END IF;
 
-            CREATE INDEX IF NOT EXISTS idx_clusters_relay_id
-                ON cluster_mgmt.clusters (relay_id)
-                WHERE relay_id IS NOT NULL;
-
-            ALTER TABLE cluster_mgmt.clusters ALTER COLUMN site_id DROP NOT NULL;
+                    -- Drop NOT NULL on site_id if it is currently NOT NULL
+                    -- (safe to run even if already nullable)
+                    ALTER TABLE cluster_mgmt.clusters ALTER COLUMN site_id DROP NOT NULL;
+                END IF;
+            END $$;
             """);
     }
 
