@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Net.Http.Headers;
-using System.Runtime.InteropServices;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CloudSmith.Api.Authorization;
+using CloudSmith.Api.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -36,11 +36,6 @@ public static class PlatformIdentityProviderEndpoints
 {
     // Microsoft Graph endpoint for app registration.
     private const string GraphApplicationsUrl = "https://graph.microsoft.com/v1.0/applications";
-
-    // Standalone key file paths (mirrors MasterSecretsKeyBootstrap).
-    private static readonly string MasterKeyFilePath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudSmith", "secrets.key")
-        : "/etc/cloudsmith/secrets.key";
 
     private static readonly HashSet<string> AllowedTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -112,6 +107,7 @@ public static class PlatformIdentityProviderEndpoints
             RegisterProviderRequest req,
             NpgsqlDataSource db,
             IHttpClientFactory httpClientFactory,
+            MasterSecretsKeyBootstrap masterKeyBootstrap,
             HttpContext ctx,
             CancellationToken ct) =>
         {
@@ -178,7 +174,7 @@ public static class PlatformIdentityProviderEndpoints
             string? encryptedSecret = null;
             if (!string.IsNullOrWhiteSpace(plaintextSecret))
             {
-                var masterKey = LoadMasterKey();
+                var masterKey = masterKeyBootstrap.LoadMasterKey();
                 if (masterKey is null)
                 {
                     return Results.Json(
@@ -343,35 +339,8 @@ public static class PlatformIdentityProviderEndpoints
     }
 
     // -------------------------------------------------------------------------
-    // Master key loading + AES-256-GCM encryption
+    // AES-256-GCM encryption
     // -------------------------------------------------------------------------
-
-    /// <summary>
-    /// Loads the master key bytes from the env var (PaaS) or key file (standalone).
-    /// Returns null if the key is unavailable.
-    /// </summary>
-    private static byte[]? LoadMasterKey()
-    {
-        // PaaS: CLOUDSMITH_MASTER_KEY env var contains the raw base64 key.
-        var envKey = Environment.GetEnvironmentVariable("CLOUDSMITH_MASTER_KEY");
-        if (!string.IsNullOrWhiteSpace(envKey))
-        {
-            try { return Convert.FromBase64String(envKey); }
-            catch { /* fall through to file */ }
-        }
-
-        // Standalone: read from the key file.
-        if (!File.Exists(MasterKeyFilePath)) return null;
-        try
-        {
-            var keyBase64 = File.ReadAllText(MasterKeyFilePath).Trim();
-            return Convert.FromBase64String(keyBase64);
-        }
-        catch
-        {
-            return null;
-        }
-    }
 
     /// <summary>
     /// Encrypts <paramref name="plaintext"/> with AES-256-GCM using <paramref name="keyBytes"/>.

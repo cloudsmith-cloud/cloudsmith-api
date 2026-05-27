@@ -231,6 +231,40 @@ public sealed class MasterSecretsKeyBootstrap : IHostedService
     }
 
     // -------------------------------------------------------------------------
+    // Master key accessor — canonical source for all encryption operations
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Loads the master key bytes from the canonical source:
+    /// PaaS → <c>CLOUDSMITH_MASTER_KEY</c> env var; standalone → key file.
+    /// Returns <see langword="null"/> if the key is unavailable.
+    /// All components that need the master key must use this method rather than
+    /// re-implementing key loading independently.
+    /// </summary>
+    public byte[]? LoadMasterKey()
+    {
+        // PaaS: CLOUDSMITH_MASTER_KEY env var contains the raw base64 key.
+        var envKey = Environment.GetEnvironmentVariable("CLOUDSMITH_MASTER_KEY");
+        if (!string.IsNullOrWhiteSpace(envKey))
+        {
+            try { return Convert.FromBase64String(envKey); }
+            catch { /* fall through to file */ }
+        }
+
+        // Standalone: read from the key file.
+        if (!File.Exists(MasterKeyFilePath)) return null;
+        try
+        {
+            var keyBase64 = File.ReadAllText(MasterKeyFilePath).Trim();
+            return Convert.FromBase64String(keyBase64);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Token revocation — called by SetupService on setup completion
     // -------------------------------------------------------------------------
 

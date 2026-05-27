@@ -4,6 +4,8 @@
 using CloudSmith.Api.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
+using Npgsql;
+using NpgsqlTypes;
 
 namespace CloudSmith.Api.Hubs;
 
@@ -33,10 +35,12 @@ namespace CloudSmith.Api.Hubs;
 public sealed class PlatformHub : Hub
 {
     private readonly ILogger<PlatformHub> _logger;
+    private readonly NpgsqlDataSource _db;
 
-    public PlatformHub(ILogger<PlatformHub> logger)
+    public PlatformHub(ILogger<PlatformHub> logger, NpgsqlDataSource db)
     {
         _logger = logger;
+        _db     = db;
     }
 
     public override async Task OnConnectedAsync()
@@ -81,7 +85,31 @@ public sealed class PlatformHub : Hub
         {
             _logger.LogWarning("PlatformHub.SubscribeCluster: empty clusterId from {ConnectionId}",
                 Context.ConnectionId);
-            return;
+            throw new HubException("clusterId is required.");
+        }
+
+        var orgId = GetOrgId();
+        if (orgId is null)
+            throw new HubException("Cluster not found or access denied.");
+
+        if (!Guid.TryParse(clusterId, out var clusterGuid))
+            throw new HubException("Cluster not found or access denied.");
+
+        // Ownership check: verify the cluster belongs to the caller's org.
+        await using var conn = await _db.OpenConnectionAsync(Context.ConnectionAborted);
+        await using var cmd = new NpgsqlCommand("""
+            SELECT 1 FROM core.clusters WHERE id = @id AND org_id = @org_id LIMIT 1
+            """, conn);
+        cmd.Parameters.Add(new NpgsqlParameter("@id", NpgsqlDbType.Uuid) { Value = clusterGuid });
+        cmd.Parameters.Add(new NpgsqlParameter("@org_id", NpgsqlDbType.Uuid) { Value = orgId.Value });
+        var exists = await cmd.ExecuteScalarAsync(Context.ConnectionAborted);
+
+        if (exists is null)
+        {
+            _logger.LogWarning(
+                "PlatformHub.SubscribeCluster: org {OrgId} denied access to cluster {ClusterId} from {ConnectionId}",
+                orgId, clusterId, Context.ConnectionId);
+            throw new HubException("Cluster not found or access denied.");
         }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, ClusterGroup(clusterId));

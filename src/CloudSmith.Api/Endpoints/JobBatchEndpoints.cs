@@ -71,12 +71,45 @@ public static class JobBatchEndpoints
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            if (req.ResourceIds.Count > 500)
+            {
+                return Results.Problem(
+                    title: "Batch too large",
+                    detail: "Maximum 500 items per batch.",
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
             var parametersJson = req.Parameters is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null }
                 ? req.Parameters.Value.GetRawText()
                 : null;
 
+            // Ownership check: every ResourceId must resolve to a cluster owned by this org.
+            // Parse each ResourceId as a UUID; reject immediately on first failure (403).
             Guid batchId;
             await using var conn = await db.OpenConnectionAsync(ct);
+
+            foreach (var resourceId in req.ResourceIds)
+            {
+                if (!Guid.TryParse(resourceId, out var resourceGuid))
+                {
+                    return Results.Json(
+                        new { error = "invalid-resource-id", message = $"Resource id '{resourceId}' is not a valid UUID." },
+                        statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                await using var ownerCmd = new NpgsqlCommand("""
+                    SELECT 1 FROM core.clusters WHERE id = @id AND org_id = @org_id LIMIT 1
+                    """, conn);
+                ownerCmd.Parameters.Add(new NpgsqlParameter("@id", NpgsqlDbType.Uuid) { Value = resourceGuid });
+                ownerCmd.Parameters.Add(new NpgsqlParameter("@org_id", NpgsqlDbType.Uuid) { Value = orgId });
+                var exists = await ownerCmd.ExecuteScalarAsync(ct);
+                if (exists is null)
+                {
+                    return Results.Json(
+                        new { error = "resource-access-denied", message = $"Resource '{resourceId}' was not found or does not belong to your organisation." },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+            }
             await using var tx = await conn.BeginTransactionAsync(ct);
 
             try
@@ -126,7 +159,7 @@ public static class JobBatchEndpoints
 
             return Results.Ok(new JobBatchResponse(batchId.ToString(), "queued"));
         })
-        .RequireAuthorization()
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("jobs:write")))
         .WithSummary("Create a bulk job batch — enqueues each resourceId as a sub-task. Returns jobId immediately. AB#1931.");
 
         return app;
