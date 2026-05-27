@@ -6,6 +6,7 @@ using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Endpoints;
 using CloudSmith.Api.Hubs;
 using CloudSmith.Api.Relay;
+using CloudSmith.Api.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
@@ -28,6 +29,15 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// AB#1601 — Deployment mode controls which OTel exporter is wired.
+// CLOUDSMITH_DEPLOYMENT_MODE=PaaS → Azure Monitor; anything else → OTLP.
+var deploymentMode = Enum.TryParse<DeploymentMode>(
+    Environment.GetEnvironmentVariable("CLOUDSMITH_DEPLOYMENT_MODE"),
+    ignoreCase: true,
+    out var parsedMode)
+    ? parsedMode
+    : DeploymentMode.Standalone;
+
 // Serilog structured logging — correlation_id + tenant_id enriched per request
 builder.Host.UseSerilog((ctx, cfg) => cfg
     .ReadFrom.Configuration(ctx.Configuration)
@@ -35,16 +45,29 @@ builder.Host.UseSerilog((ctx, cfg) => cfg
     .Enrich.WithProperty("service", "cloudsmith-api")
     .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {CorrelationId} {TenantId} {Message:lj}{NewLine}{Exception}"));
 
-// OpenTelemetry tracing — OTLP for local docker-compose; Azure Monitor for PaaS
+// OpenTelemetry tracing — exporter selected by DeploymentMode (AB#1601).
+// Standalone: OTLP to local otel-collector.
+// PaaS: Azure Monitor / Application Insights — connection string from
+//       ApplicationInsights:ConnectionString config (populated at deploy time by
+//       the platform secrets layer, key "appinsights_connection_string").
 var otelBuilder = builder.Services.AddOpenTelemetry()
     .ConfigureResource(r => r.AddService("cloudsmith-api"))
-    .WithTracing(t => t
-        .AddAspNetCoreInstrumentation()
-        .AddOtlpExporter(o => o.Endpoint = new Uri(
-            builder.Configuration["OpenTelemetry:Endpoint"] ?? "http://localhost:4317")));
-var aiConnString = builder.Configuration["ApplicationInsights:ConnectionString"];
-if (!string.IsNullOrEmpty(aiConnString))
-    otelBuilder.UseAzureMonitor(o => o.ConnectionString = aiConnString);
+    .WithTracing(t => t.AddAspNetCoreInstrumentation());
+
+if (deploymentMode == DeploymentMode.PaaS)
+{
+    var aiConnString = builder.Configuration["ApplicationInsights:ConnectionString"];
+    otelBuilder.UseAzureMonitor(o =>
+    {
+        if (!string.IsNullOrEmpty(aiConnString))
+            o.ConnectionString = aiConnString;
+    });
+}
+else
+{
+    otelBuilder.WithTracing(t => t.AddOtlpExporter(o =>
+        o.Endpoint = new Uri(builder.Configuration["OpenTelemetry:Endpoint"] ?? "http://localhost:4317")));
+}
 
 // Platform kernel (migrations + RBAC + Config + health + NpgsqlDataSource)
 var connectionString = builder.Configuration.GetConnectionString("Default")
@@ -132,6 +155,10 @@ builder.Services.AddRateLimiter(opts =>
 
 // Relay WebSocket hub — in-memory registry of connected relay sockets (AB#1679)
 builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>();
+
+// AB#1591 — First-startup bootstrap: generate master secrets key + print initial admin token.
+// Runs as IHostedService before the app starts accepting requests.
+builder.Services.AddHostedService<MasterSecretsKeyBootstrap>();
 
 var app = builder.Build();
 
@@ -225,12 +252,14 @@ app.MapScalarApiReference();
 
 app.Run();
 
-// Runs FluentMigrator for cluster-mgmt and inventory in separate isolated scopes.
-// Each module's AddXxx() registers its own FM runner; calling them both on the main
-// service collection would cause the last registration to overwrite the first.
-// Isolated scopes ensure each assembly's migrations run against the correct runner.
+// Runs FluentMigrator for the API project, cluster-mgmt, and inventory in separate
+// isolated scopes. Each module's AddXxx() registers its own FM runner; calling them
+// all on the main service collection would cause the last registration to overwrite
+// the first. Isolated scopes ensure each assembly's migrations run correctly.
 static void MigrateAllDatabases(string connectionString)
 {
+    // AB#1591 — API-project migrations (bootstrap_config, etc.)
+    RunMigrations(connectionString, typeof(Program).Assembly);
     RunMigrations(connectionString, typeof(CloudSmith.ClusterMgmt.ClusterMgmtExtensions).Assembly);
     RunMigrations(connectionString, typeof(CloudSmith.Inventory.InventoryExtensions).Assembly);
 }
