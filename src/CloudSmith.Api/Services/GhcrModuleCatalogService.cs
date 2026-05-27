@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 
 namespace CloudSmith.Api.Services;
 
@@ -20,6 +21,7 @@ public sealed class GhcrModuleCatalogService : IModuleCatalogService
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
 
     private readonly HttpClient _http;
+    private readonly ILogger<GhcrModuleCatalogService> _logger;
 
     private IReadOnlyList<ModuleCatalogEntry>? _cached;
     private DateTimeOffset _cacheExpiry = DateTimeOffset.MinValue;
@@ -31,9 +33,10 @@ public sealed class GhcrModuleCatalogService : IModuleCatalogService
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    public GhcrModuleCatalogService(HttpClient httpClient)
+    public GhcrModuleCatalogService(HttpClient httpClient, ILogger<GhcrModuleCatalogService> logger)
     {
-        _http = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _http   = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _logger = logger    ?? throw new ArgumentNullException(nameof(logger));
     }
 
     /// <inheritdoc />
@@ -122,6 +125,19 @@ public sealed class GhcrModuleCatalogService : IModuleCatalogService
 
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 break;
+
+            // 401/403 means no token or insufficient scope — return empty catalog
+            // rather than crashing. The catalog is a best-effort feature when no
+            // GITHUB_TOKEN is configured (e.g. air-gapped on-prem installs).
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                _logger.LogWarning(
+                    "GHCR catalog fetch returned {StatusCode} — no token or insufficient scope. " +
+                    "Set GITHUB_TOKEN env var with read:packages scope to enable the module catalog.",
+                    response.StatusCode);
+                break;
+            }
 
             response.EnsureSuccessStatusCode();
 
