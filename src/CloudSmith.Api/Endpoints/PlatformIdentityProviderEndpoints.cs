@@ -79,9 +79,9 @@ public static class PlatformIdentityProviderEndpoints
             // HTML-encode the code to prevent XSS before injecting into the script tag.
             var safeCode = System.Net.WebUtility.HtmlEncode(code);
 
-            var html = $"""
+            var html = $$"""
                 <!DOCTYPE html><html><body><script>
-                new BroadcastChannel('cloudsmith-oauth-callback').postMessage({{type:'consent-code',code:'{safeCode}'}});
+                new BroadcastChannel('cloudsmith-oauth-callback').postMessage({type:'consent-code',code:'{{safeCode}}'});
                 window.close();
                 </script></body></html>
                 """;
