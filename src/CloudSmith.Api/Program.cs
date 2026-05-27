@@ -178,6 +178,16 @@ builder.Services.AddScoped<CloudSmith.Api.Services.INotificationService, CloudSm
 // AB#1933 — HttpClient for Microsoft Graph calls (Entra auto-create flow).
 builder.Services.AddHttpClient("graph");
 
+// AB#1925 — Published module catalog: proxies GHCR registry + merges local install state.
+// Anonymous access is sufficient for catalog browsing; HttpClient configured with GitHub API headers.
+builder.Services.AddHttpClient<IModuleCatalogService, GhcrModuleCatalogService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com");
+    client.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
+    client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+    client.DefaultRequestHeaders.Add("User-Agent", "cloudsmith-api/catalog");
+});
+
 // AB#1591 — First-startup bootstrap: generate master secrets key + write initial admin token.
 // Registered as a singleton so SetupEndpoints can inject it for token validation (C2 security fix).
 // AddHostedService with a factory resolves the same singleton instance for IHostedService.
@@ -265,6 +275,7 @@ app.MapDashboardLayoutEndpoints();    // AB#1930 GET/PATCH /api/v1/users/me/dash
 app.MapJobBatchEndpoints();           // AB#1931 POST /api/v1/jobs/batch — bulk job batching
 app.MapNotificationsEndpoints();      // AB#1932 GET/PATCH /api/v1/notifications
 app.MapPlatformIdentityProviderEndpoints(); // AB#1933 POST/GET /api/v1/platform/identity/providers
+app.MapModuleCatalogEndpoints();            // AB#1925 GET /api/v1/modules/catalog, POST/DELETE /api/v1/modules/{id}
 
 // SignalR PlatformHub — real-time events for portal and runners (AB#1436).
 // Requires JWT Bearer or cookie auth (handled by ASP.NET Core middleware).
