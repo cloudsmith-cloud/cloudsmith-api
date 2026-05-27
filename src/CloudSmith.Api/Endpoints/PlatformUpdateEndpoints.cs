@@ -70,7 +70,8 @@ public static class PlatformUpdateEndpoints
                 return await FetchLatestGhcrDigestAsync(httpClientFactory, ct);
             });
 
-            var (latestVersion, latestDigest, fetchError) = cached ?? (null, null, "cache miss");
+            var (latestVersion, latestDigest, fetchError) = cached
+                ?? ((string?)null, (string?)null, (string?)"cache miss");
 
             if (fetchError is not null)
             {
@@ -101,7 +102,7 @@ public static class PlatformUpdateEndpoints
         group.MapPut("/apply", async (
             IHubContext<PlatformHub> hub,
             IHttpClientFactory httpClientFactory,
-            ILogger<PlatformUpdateEndpoints> logger,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var updateId = Guid.NewGuid();
@@ -112,6 +113,7 @@ public static class PlatformUpdateEndpoints
             {
                 // PaaS path: swap ACA revision via ARM API using DefaultAzureCredential
                 // (the ACA managed identity has ACA Contributor on the RG).
+                var logger = loggerFactory.CreateLogger(nameof(PlatformUpdateEndpoints));
                 var (success, message) = await ApplyAcaUpdateAsync(logger, ct);
 
                 if (!success)
@@ -129,6 +131,7 @@ public static class PlatformUpdateEndpoints
             }
             else
             {
+                var logger = loggerFactory.CreateLogger(nameof(PlatformUpdateEndpoints));
                 // On-prem path: broadcast to all runner agents connected to the platform group.
                 await hub.Clients
                     .Group("platform:runners")
