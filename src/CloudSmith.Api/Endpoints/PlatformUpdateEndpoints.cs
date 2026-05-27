@@ -76,23 +76,18 @@ public static class PlatformUpdateEndpoints
 
             (latestVersion, latestDigest, fetchError) = cachedResult;
 
-            if (fetchError is not null)
-            {
-                // Surface the error so callers know the check could not complete.
-                return Results.Json(
-                    new { error = "ghcr-fetch-failed", message = fetchError },
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-
-            var updateAvailable = !string.IsNullOrEmpty(latestVersion)
+            // Degrade gracefully when GHCR is unavailable (no token, rate-limited, unreachable).
+            // Return 200 with updateAvailable=false so the portal/CLI can still render without error.
+            var updateAvailable = fetchError is null
+                && !string.IsNullOrEmpty(latestVersion)
                 && !string.IsNullOrEmpty(currentVersion)
                 && !string.Equals(currentVersion, latestVersion, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(currentVersion, latestDigest, StringComparison.OrdinalIgnoreCase);
 
             return Results.Ok(new UpdateCheckResponse(
                 CurrentVersion:  currentVersion ?? "unknown",
-                LatestVersion:   latestVersion  ?? "unknown",
-                LatestDigest:    latestDigest   ?? "unknown",
+                LatestVersion:   latestVersion  ?? (fetchError is not null ? "unavailable" : "unknown"),
+                LatestDigest:    latestDigest   ?? (fetchError is not null ? "unavailable" : "unknown"),
                 UpdateAvailable: updateAvailable,
                 CheckedAt:       DateTimeOffset.UtcNow));
         })
