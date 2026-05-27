@@ -35,7 +35,12 @@ public static class ModuleCatalogEndpoints
         string? SignatureRef,
         bool IsVerified,
         bool IsInstalled,
-        bool IsEnabled);
+        bool IsEnabled,
+        /// <summary>
+        /// True when the module is installed and the catalog version is newer than the installed version.
+        /// AB#1959.
+        /// </summary>
+        bool UpdateAvailable);
 
     /// <summary>
     /// Request body for POST /api/v1/modules/{id}/install.
@@ -71,18 +76,23 @@ public static class ModuleCatalogEndpoints
             var items = catalogEntries.Select(entry =>
             {
                 var hasLocal = installed.TryGetValue(entry.Id, out var local);
+                // AB#1959 — updateAvailable: true when installed version < catalog version (semver).
+                var updateAvailable = hasLocal
+                    && local is not null
+                    && IsNewerVersion(entry.Version, local.Version);
                 return new CatalogItemResponse(
-                    Id:           entry.Id,
-                    Name:         entry.Name,
-                    Version:      entry.Version,
-                    Description:  entry.Description,
-                    Publisher:    entry.Publisher,
-                    GhcrImageRef: entry.GhcrImageRef,
-                    ManifestUrl:  entry.ManifestUrl,
-                    SignatureRef: entry.SignatureRef,
-                    IsVerified:   entry.IsVerified,
-                    IsInstalled:  hasLocal,
-                    IsEnabled:    hasLocal && local!.IsEnabled);
+                    Id:              entry.Id,
+                    Name:            entry.Name,
+                    Version:         entry.Version,
+                    Description:     entry.Description,
+                    Publisher:       entry.Publisher,
+                    GhcrImageRef:    entry.GhcrImageRef,
+                    ManifestUrl:     entry.ManifestUrl,
+                    SignatureRef:    entry.SignatureRef,
+                    IsVerified:      entry.IsVerified,
+                    IsInstalled:     hasLocal,
+                    IsEnabled:       hasLocal && local!.IsEnabled,
+                    UpdateAvailable: updateAvailable);
             }).ToList();
 
             var response = new CatalogResponse(
@@ -97,15 +107,18 @@ public static class ModuleCatalogEndpoints
 
         // POST /api/v1/modules/{id}/install
         // Looks up the catalog entry and upserts into core.installed_modules.
+        // Accepts an optional ?version query parameter to pin a specific version (AB#1959).
         // Actual image pull is a future concern — records install intent and returns 202.
         group.MapPost("/{id}/install", async (
             string id,
+            string? version,
             InstallCatalogModuleRequest? body,
             IModuleCatalogService catalog,
             NpgsqlDataSource db,
             CancellationToken ct) =>
         {
-            var requestedVersion = body?.Version;
+            // Query parameter ?version takes precedence over request body version field.
+            var requestedVersion = version ?? body?.Version;
 
             // Lookup catalog entry — 404 if module or version not found.
             var entry = await catalog.GetAsync(id, requestedVersion, ct);
@@ -171,6 +184,27 @@ public static class ModuleCatalogEndpoints
     // -------------------------------------------------------------------------
 
     private sealed record InstalledModuleState(string Id, string Version, bool IsEnabled);
+
+    /// <summary>
+    /// Returns true when <paramref name="catalogVersion"/> is strictly greater than
+    /// <paramref name="installedVersion"/> using semver-compatible comparison.
+    /// Pre-release suffixes (e.g. -rc.1) are stripped before comparison.
+    /// AB#1959.
+    /// </summary>
+    private static bool IsNewerVersion(string catalogVersion, string installedVersion)
+    {
+        static Version Parse(string v)
+        {
+            var s = v.StartsWith('v') ? v[1..] : v;
+            var dashIdx = s.IndexOf('-');
+            if (dashIdx >= 0) s = s[..dashIdx];
+            var plusIdx = s.IndexOf('+');
+            if (plusIdx >= 0) s = s[..plusIdx];
+            return Version.TryParse(s, out var parsed) ? parsed : new Version(0, 0, 0);
+        }
+
+        return Parse(catalogVersion) > Parse(installedVersion);
+    }
 
     private static async Task<Dictionary<string, InstalledModuleState>> LoadInstalledModulesAsync(
         NpgsqlDataSource db,

@@ -69,6 +69,28 @@ public static class PlatformIdentityProviderEndpoints
     {
         var group = app.MapGroup("/api/v1/platform/identity").WithTags("Platform");
 
+        // POST /api/v1/platform/identity/consent-callback — AB#1934.
+        // Anonymous redirect target after Entra OAuth admin-consent popup.
+        // Broadcasts the authorization code to the portal via BroadcastChannel, then closes the popup.
+        group.MapPost("/consent-callback", (HttpContext ctx) =>
+        {
+            var code = ctx.Request.Query["code"].FirstOrDefault() ?? string.Empty;
+
+            // HTML-encode the code to prevent XSS before injecting into the script tag.
+            var safeCode = System.Net.WebUtility.HtmlEncode(code);
+
+            var html = $"""
+                <!DOCTYPE html><html><body><script>
+                new BroadcastChannel('cloudsmith-oauth-callback').postMessage({{type:'consent-code',code:'{safeCode}'}});
+                window.close();
+                </script></body></html>
+                """;
+
+            return Results.Content(html, "text/html");
+        })
+        .AllowAnonymous()
+        .WithSummary("Entra OAuth consent redirect target — posts auth code to BroadcastChannel and closes the popup. AB#1934.");
+
         // GET /api/v1/platform/identity/providers — list configured providers, no secret values.
         group.MapGet("/providers", async (
             NpgsqlDataSource db,
