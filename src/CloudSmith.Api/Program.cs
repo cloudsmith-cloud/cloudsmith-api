@@ -89,7 +89,11 @@ static string ResolveConnectionString(Microsoft.Extensions.Configuration.IConfig
     var host     = cfg["ConnectionStrings:DefaultHost"]     ?? "localhost";
     var database = cfg["ConnectionStrings:DefaultDatabase"] ?? "cloudsmith";
     var user     = cfg["ConnectionStrings:DefaultUser"]     ?? "cloudsmith";
-    return $"Host={host};Database={database};Username={user};Password={raw};SSL Mode=Require;Trust Server Certificate=true";
+    // Use SSL=Prefer so pgbouncer (localhost, no SSL) and direct PG (SSL enforced) both work.
+    // pgbouncer listens on localhost without SSL; Azure PG Flexible requires SSL but
+    // when pgbouncer is the host we connect to localhost. Prefer falls back to plain when SSL fails.
+    var sslMode  = host == "localhost" ? "Disable" : "Require";
+    return $"Host={host};Database={database};Username={user};Password={raw};SSL Mode={sslMode};Trust Server Certificate=true";
 }
 var connectionString = ResolveConnectionString(builder.Configuration);
 builder.Services.AddCloudSmithCore(connectionString);
