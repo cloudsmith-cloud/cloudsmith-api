@@ -169,6 +169,15 @@ builder.Services.AddRateLimiter(opts =>
 // Relay WebSocket hub — in-memory registry of connected relay sockets (AB#1679)
 builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>();
 
+// AB#1931 — In-process job batch processor (Phase IV; replaced by durable worker in Phase V).
+builder.Services.AddSingleton<CloudSmith.Api.Services.IJobBatchProcessor, CloudSmith.Api.Services.InProcessJobBatchProcessor>();
+
+// AB#1932 — Notification service for job completion/failure events.
+builder.Services.AddScoped<CloudSmith.Api.Services.INotificationService, CloudSmith.Api.Services.PostgresNotificationService>();
+
+// AB#1933 — HttpClient for Microsoft Graph calls (Entra auto-create flow).
+builder.Services.AddHttpClient("graph");
+
 // AB#1591 — First-startup bootstrap: generate master secrets key + write initial admin token.
 // Registered as a singleton so SetupEndpoints can inject it for token validation (C2 security fix).
 // AddHostedService with a factory resolves the same singleton instance for IHostedService.
@@ -251,6 +260,11 @@ app.MapSecretsEndpoints();            // AB#1653 Secrets refs CRUD
 app.MapRelayEndpoints();              // AB#1670 Relay bridge — enrollment, clusters POST, inventory ingest, health probe
 app.MapHardwareCatalogEndpoints();    // AB#1496 hardware catalog profiles + drift reports
 app.MapPermissionsEndpoints();        // AB#1422 /auth/v1/me/permissions — caller's effective permission set
+app.MapPlatformAuditEndpoints();      // AB#1929 POST /api/v1/platform/audit — portal-originated audit event ingest
+app.MapDashboardLayoutEndpoints();    // AB#1930 GET/PATCH /api/v1/users/me/dashboard-layout
+app.MapJobBatchEndpoints();           // AB#1931 POST /api/v1/jobs/batch — bulk job batching
+app.MapNotificationsEndpoints();      // AB#1932 GET/PATCH /api/v1/notifications
+app.MapPlatformIdentityProviderEndpoints(); // AB#1933 POST/GET /api/v1/platform/identity/providers
 
 // SignalR PlatformHub — real-time events for portal and runners (AB#1436).
 // Requires JWT Bearer or cookie auth (handled by ASP.NET Core middleware).
