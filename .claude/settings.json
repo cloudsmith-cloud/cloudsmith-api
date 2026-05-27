@@ -1,0 +1,106 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/load-memory.ps1",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/check-context.ps1",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/block-secrets.ps1" },
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/validate-path.ps1" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/block-secrets.ps1" },
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/block-destructive.ps1" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/log-tokens.ps1" }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/log-operate.ps1" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/log-agent-result.ps1" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "pwsh -NonInteractive -File E:/git/cloudsmith-cloud/cloudsmith-internal/.claude/hooks/summarize-session.ps1" }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh api:*)",
+      "Bash(pwsh -NoProfile -Command ':*)",
+      "Bash(pwsh -NoProfile -File ':*)",
+      "Bash(pwsh -NonInteractive -Command ':*)",
+      "Bash(pwsh -NonInteractive -File ':*)",
+      "Read(//e/git/cloudsmith-cloud/**)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:learn.microsoft.com)",
+      "WebFetch(domain:docs.github.com)",
+      "Bash(az account get-access-token *)",
+      "Bash(az account show *)",
+      "Bash(az boards query *)",
+      "Bash(az boards work-item show *)",
+      "Bash(az containerapp show *)",
+      "Bash(az containerapp logs show *)",
+      "Bash(az group list *)",
+      "Bash(az keyvault secret list *)",
+      "Bash(gh repo list *)"
+    ]
+  }
+}
