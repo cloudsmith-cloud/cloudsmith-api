@@ -14,7 +14,8 @@ FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
 EXPOSE 8080
 ENV ASPNETCORE_URLS=http://+:8080
+# dotnet/aspnet:9.0 (Debian Bookworm) has no curl/wget — use bash /dev/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD wget -qO- http://localhost:8080/health/live || exit 1
+  CMD bash -c "(echo > /dev/tcp/localhost/8080) 2>/dev/null || exit 1"
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "CloudSmith.Api.dll"]
