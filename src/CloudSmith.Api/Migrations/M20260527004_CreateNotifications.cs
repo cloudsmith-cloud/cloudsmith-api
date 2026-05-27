@@ -27,6 +27,10 @@ public sealed class M20260527004_CreateNotifications : Migration
                 created_at      timestamptz NOT NULL DEFAULT now()
             );
 
+            -- Idempotent: add 'read' column in case the table was partially created
+            -- by a prior failed migration run (CREATE TABLE IF NOT EXISTS skips the body).
+            ALTER TABLE core.notifications ADD COLUMN IF NOT EXISTS read boolean NOT NULL DEFAULT false;
+
             CREATE INDEX IF NOT EXISTS ix_notifications_user_created
                 ON core.notifications (user_id, created_at DESC);
 
