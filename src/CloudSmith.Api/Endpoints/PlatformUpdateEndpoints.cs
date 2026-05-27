@@ -64,14 +64,17 @@ public static class PlatformUpdateEndpoints
             var currentVersion = ResolveCurrentVersion();
 
             // Attempt to get the latest digest from GHCR (or cache).
-            var cached = await cache.GetOrCreateAsync(CacheKey, async entry =>
-            {
-                entry.AbsoluteExpirationRelativeToNow = CacheTtl;
-                return await FetchLatestGhcrDigestAsync(httpClientFactory, ct);
-            });
+            string? latestVersion;
+            string? latestDigest;
+            string? fetchError;
 
-            var (latestVersion, latestDigest, fetchError) = cached
-                ?? ((string?)null, (string?)null, (string?)"cache miss");
+            if (!cache.TryGetValue(CacheKey, out (string?, string?, string?) cachedResult))
+            {
+                cachedResult = await FetchLatestGhcrDigestAsync(httpClientFactory, ct);
+                cache.Set(CacheKey, cachedResult, CacheTtl);
+            }
+
+            (latestVersion, latestDigest, fetchError) = cachedResult;
 
             if (fetchError is not null)
             {
