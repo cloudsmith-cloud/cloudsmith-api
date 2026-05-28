@@ -41,12 +41,14 @@ var deploymentMode = Enum.TryParse<DeploymentMode>(
     ? parsedMode
     : DeploymentMode.Standalone;
 
-// Serilog structured logging — correlation_id + tenant_id enriched per request
+// Serilog structured logging — AB#2357 standardised enricher set (service + machine + context).
+// Same template as cloudsmith-relay and cloudsmith-agent for cross-substrate log consistency.
 builder.Host.UseSerilog((ctx, cfg) => cfg
     .ReadFrom.Configuration(ctx.Configuration)
     .Enrich.FromLogContext()
     .Enrich.WithProperty("service", "cloudsmith-api")
-    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {CorrelationId} {TenantId} {Message:lj}{NewLine}{Exception}"));
+    .Enrich.WithProperty("machine", Environment.MachineName)
+    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] [{service}] {CorrelationId}{TenantId}{Message:lj}{NewLine}{Exception}"));
 
 // OpenTelemetry tracing — exporter selected by DeploymentMode (AB#1601).
 // Standalone: OTLP to local otel-collector.
