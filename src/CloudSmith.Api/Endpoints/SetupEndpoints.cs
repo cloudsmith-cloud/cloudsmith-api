@@ -54,10 +54,30 @@ public static class SetupEndpoints
             CancellationToken ct) =>
         {
             // Validate the one-time initial admin token (C2 — enforces TTL).
+            // AB#2349 / ADR-047 amendment: errors include the substrate-specific
+            // retrieval command so operators are not stuck guessing how to find the token.
+            var isPaaS = string.Equals(
+                Environment.GetEnvironmentVariable("CLOUDSMITH_DEPLOYMENT_MODE"),
+                "paas",
+                StringComparison.OrdinalIgnoreCase);
+            var kvName = Environment.GetEnvironmentVariable("CLOUDSMITH_KEY_VAULT_NAME");
+
+            string retrievalHint = isPaaS && !string.IsNullOrWhiteSpace(kvName)
+                ? $"Retrieve with: az keyvault secret show --vault-name {kvName} --name cloudsmith-initial-admin-token --query value -o tsv"
+                : isPaaS
+                    ? "Retrieve from the API container at /etc/cloudsmith/initial-admin-token.txt (CLOUDSMITH_KEY_VAULT_NAME is not configured — set it via Bicep for KV-based retrieval)."
+                    : "Retrieve from the host VM at /etc/cloudsmith/initial-admin-token.txt (Linux, mode 600) or %PROGRAMDATA%\\CloudSmith\\initial-admin-token.txt (Windows).";
+
             if (string.IsNullOrWhiteSpace(req.InitialAdminToken))
             {
                 return Results.Json(
-                    new { error = "token-required", message = "A valid initial admin token is required to complete setup." },
+                    new
+                    {
+                        error          = "token-required",
+                        message        = "A valid initial admin token is required to complete setup.",
+                        howToRetrieve  = retrievalHint,
+                        ttlHours       = 24,
+                    },
                     statusCode: StatusCodes.Status401Unauthorized);
             }
 
@@ -66,13 +86,23 @@ public static class SetupEndpoints
             {
                 case TokenValidationResult.Expired:
                     return Results.Json(
-                        new { error = "token-expired", message = "The initial admin token has expired (30-minute TTL). Restart the CloudSmith service to generate a new token." },
+                        new
+                        {
+                            error         = "token-expired",
+                            message       = "The initial admin token has expired (24-hour TTL). Restart the CloudSmith service to generate a fresh token.",
+                            howToRecover  = retrievalHint,
+                        },
                         statusCode: StatusCodes.Status410Gone);
 
                 case TokenValidationResult.NotFound:
                 case TokenValidationResult.Invalid:
                     return Results.Json(
-                        new { error = "token-invalid", message = "The initial admin token is invalid." },
+                        new
+                        {
+                            error          = "token-invalid",
+                            message        = "The supplied initial admin token does not match the one issued at first start (or it has already been consumed).",
+                            howToRetrieve  = retrievalHint,
+                        },
                         statusCode: StatusCodes.Status401Unauthorized);
             }
 
