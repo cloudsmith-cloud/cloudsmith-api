@@ -7,6 +7,8 @@ using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Endpoints;
 using CloudSmith.Api.Hubs;
 using CloudSmith.Api.Relay;
+using CloudSmith.Api.Substrate;
+using CloudSmith.Core.Substrate;
 using CloudSmith.Api.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
@@ -219,6 +221,16 @@ builder.Services.AddHttpClient("ghcr-update", client =>
 
 // AB#1952 — IMemoryCache for caching GHCR digest lookups (15-minute TTL).
 builder.Services.AddMemoryCache();
+
+// AB#2354 — Substrate adapter: collapses all _isPaaS branches into one DI decision.
+// PaaS → PaaSAdapter (Azure KV + ACA ARM). OnPrem/Appliance → OnPremAdapter (files + SignalR).
+var kvNameForAdapter = Environment.GetEnvironmentVariable("CLOUDSMITH_KEY_VAULT_NAME") ?? string.Empty;
+builder.Services.AddSingleton<ISubstrateAdapter>(sp =>
+    deploymentMode switch
+    {
+        DeploymentMode.PaaS => (ISubstrateAdapter)new PaaSAdapter(kvNameForAdapter, sp.GetRequiredService<ILogger<PaaSAdapter>>()),
+        _                   => new OnPremAdapter(sp.GetRequiredService<IHubContext<PlatformHub>>(), sp.GetRequiredService<ILogger<OnPremAdapter>>()),
+    });
 
 // AB#1591 — First-startup bootstrap: generate master secrets key + write initial admin token.
 // Registered as a singleton so SetupEndpoints can inject it for token validation (C2 security fix).

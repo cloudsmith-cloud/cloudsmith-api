@@ -3,9 +3,8 @@
 
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using Azure;
-using Azure.Identity;
-using Azure.Security.KeyVault.Secrets;
+using CloudSmith.Api.Substrate;
+using CloudSmith.Core.Substrate;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -50,31 +49,20 @@ public sealed class MasterSecretsKeyBootstrap : IHostedService
     //   az keyvault secret show --vault-name <kv> --name cloudsmith-initial-admin-token --query value -o tsv
     private const string InitialTokenSecretName  = "cloudsmith-initial-admin-token";
 
-    // PaaS: env var name set by Bicep that tells the API which Key Vault to write to.
-    private const string KeyVaultNameEnvVar      = "CLOUDSMITH_KEY_VAULT_NAME";
-
     // Secret name used when storing the master key file on standalone deployments.
     private static readonly string MasterKeyFilePath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
         ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudSmith", "secrets.key")
         : "/etc/cloudsmith/secrets.key";
 
-    // Path where the initial admin token is written on standalone deployments.
-    private static readonly string InitialTokenFilePath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudSmith", "initial-admin-token.txt")
-        : "/etc/cloudsmith/initial-admin-token.txt";
-
     private readonly NpgsqlDataSource _db;
     private readonly ILogger<MasterSecretsKeyBootstrap> _logger;
-    private readonly bool _isPaaS;
+    private readonly ISubstrateAdapter _substrate;
 
-    public MasterSecretsKeyBootstrap(NpgsqlDataSource db, ILogger<MasterSecretsKeyBootstrap> logger)
+    public MasterSecretsKeyBootstrap(NpgsqlDataSource db, ILogger<MasterSecretsKeyBootstrap> logger, ISubstrateAdapter substrate)
     {
-        _db    = db;
-        _logger = logger;
-        _isPaaS = string.Equals(
-            Environment.GetEnvironmentVariable("CLOUDSMITH_DEPLOYMENT_MODE"),
-            "paas",
-            StringComparison.OrdinalIgnoreCase);
+        _db        = db;
+        _logger    = logger;
+        _substrate = substrate;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -112,7 +100,7 @@ public sealed class MasterSecretsKeyBootstrap : IHostedService
             return;
         }
 
-        if (_isPaaS)
+        if (_substrate.Mode == SubstrateMode.PaaS)
         {
             // PaaS: key material must be injected via CLOUDSMITH_MASTER_KEY env var
             // (ACA Key Vault secret reference). Validate it is present and non-empty.
@@ -242,94 +230,18 @@ public sealed class MasterSecretsKeyBootstrap : IHostedService
         await AppendAuditRowAsync(conn, "initial_admin_token_issued",
             afterJson: $"{{\"expires_at\":\"{expiry:o}\"}}", ct);
 
-        // Write the plaintext token to a restricted file — never to stdout.
-        var tokenFilePath = _isPaaS
-            ? (Environment.GetEnvironmentVariable("CLOUDSMITH_TOKEN_PATH") ?? InitialTokenFilePath)
-            : InitialTokenFilePath;
+        // AB#2354 — delegate write to the substrate adapter (PaaS → KV; on-prem → restricted file).
+        await _substrate.WriteOperatorArtifactAsync(InitialTokenSecretName, token, ArtifactKind.Secret, ct);
 
-        WriteKeyFile(tokenFilePath, token);
-
-        // Only the file path goes to stdout / logs — never the token value itself.
-        Console.WriteLine($"[CloudSmith] Initial admin token written to: {tokenFilePath}");
-
-        // ADR-047 OQ-047-B resolution (AB#2349, 2026-05-27): on PaaS also push the
-        // token to Key Vault so the operator can retrieve it with a single az CLI
-        // command. The file inside the ACA container is unreachable for typical
-        // operators; only KV is operator-accessible. On-prem keeps the file path
-        // since the file is already on the operator-controlled host VM.
-        if (_isPaaS)
-        {
-            await TryWriteTokenToKeyVaultAsync(token, expiry, ct);
-        }
+        // Only the retrieval hint goes to stdout — never the token value itself.
+        Console.WriteLine($"[CloudSmith] Initial admin token written. Retrieve with: {_substrate.GetOperatorRetrievalHint(InitialTokenSecretName)}");
 
         _logger.LogWarning(
-            _isPaaS
-                ? "Initial admin token written to KV secret '{SecretName}' (expires {ExpiresAt:o}). " +
-                  "Retrieve with: az keyvault secret show --vault-name <kv> --name {SecretName} --query value -o tsv. " +
-                  "Complete first-run setup within {TtlHours} hours."
-                : "Initial admin token written to {TokenFilePath} (mode 600, expires {ExpiresAt:o}). " +
-                  "Complete first-run setup within {TtlHours} hours to activate the admin account.",
-            _isPaaS ? (object)InitialTokenSecretName : tokenFilePath,
+            "Initial admin token written (expires {ExpiresAt:o}). " +
+            "Retrieve with: {RetrievalHint}. Complete first-run setup within {TtlHours} hours.",
             expiry,
+            _substrate.GetOperatorRetrievalHint(InitialTokenSecretName),
             TokenTtlMinutes / 60);
-    }
-
-    /// <summary>
-    /// AB#2349 / ADR-047 OQ-047-B — write the plaintext initial admin token to
-    /// the deploy-time Key Vault as secret <c>cloudsmith-initial-admin-token</c>
-    /// so PaaS operators can retrieve it via az CLI / Azure portal. Best-effort:
-    /// failure is logged but does not block startup, because the file path is
-    /// still written as a fallback.
-    /// </summary>
-    private async Task TryWriteTokenToKeyVaultAsync(string token, DateTimeOffset expiry, CancellationToken ct)
-    {
-        var kvName = Environment.GetEnvironmentVariable(KeyVaultNameEnvVar);
-        if (string.IsNullOrWhiteSpace(kvName))
-        {
-            _logger.LogWarning(
-                "PaaS mode but {EnvVar} is not set — skipping KV token push. " +
-                "Bicep must set this env var on the API Container App for operator-friendly token retrieval.",
-                KeyVaultNameEnvVar);
-            return;
-        }
-
-        try
-        {
-            var vaultUri = new Uri($"https://{kvName}.vault.azure.net/");
-            var client   = new SecretClient(vaultUri, new DefaultAzureCredential());
-
-            var secret = new KeyVaultSecret(InitialTokenSecretName, token)
-            {
-                Properties =
-                {
-                    ExpiresOn   = expiry,
-                    ContentType = "text/plain",
-                }
-            };
-            secret.Properties.Tags["managed-by"] = "cloudsmith-api";
-            secret.Properties.Tags["purpose"]    = "initial-admin-token";
-
-            await client.SetSecretAsync(secret, ct).ConfigureAwait(false);
-
-            _logger.LogInformation(
-                "Initial admin token pushed to Key Vault '{Vault}' as secret '{Secret}' (expires {ExpiresAt:o}).",
-                kvName, InitialTokenSecretName, expiry);
-        }
-        catch (RequestFailedException ex) when (ex.Status == 403)
-        {
-            _logger.LogError(ex,
-                "Initial admin token KV push FORBIDDEN (403) for vault '{Vault}'. " +
-                "The API's managed identity needs 'Key Vault Secrets Officer' role (not just 'User'). " +
-                "Operator must retrieve the token from the ACA container file instead.",
-                kvName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Initial admin token KV push failed for vault '{Vault}'. " +
-                "Operator must retrieve the token from the ACA container file instead.",
-                kvName);
-        }
     }
 
     // -------------------------------------------------------------------------

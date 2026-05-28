@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Text.Json;
-using Azure.Identity;
-using Azure.ResourceManager;
-using Azure.ResourceManager.AppContainers;
 using CloudSmith.Api.Authorization;
-using CloudSmith.Api.Hubs;
-using Microsoft.AspNetCore.SignalR;
+using CloudSmith.Core.Substrate;
 using Microsoft.Extensions.Caching.Memory;
 
 namespace CloudSmith.Api.Endpoints;
@@ -98,51 +94,27 @@ public static class PlatformUpdateEndpoints
         // PaaS: issues an ACA revision swap via Azure Resource Manager (Managed Identity).
         // On-prem: broadcasts a platform:update event to connected runner agents via SignalR.
         group.MapPut("/apply", async (
-            IHubContext<PlatformHub> hub,
-            IHttpClientFactory httpClientFactory,
-            ILoggerFactory loggerFactory,
+            ISubstrateAdapter substrate,
             CancellationToken ct) =>
         {
             var updateId = Guid.NewGuid();
-            var deploymentModel = (Environment.GetEnvironmentVariable("CLOUDSMITH_DEPLOYMENT_MODEL")
-                ?? string.Empty).Trim().ToLowerInvariant();
-
-            if (deploymentModel == "paas")
+            try
             {
-                // PaaS path: swap ACA revision via ARM API using DefaultAzureCredential
-                // (the ACA managed identity has ACA Contributor on the RG).
-                var logger = loggerFactory.CreateLogger(nameof(PlatformUpdateEndpoints));
-                var (success, message) = await ApplyAcaUpdateAsync(logger, ct);
-
-                if (!success)
-                {
-                    return Results.Json(
-                        new { error = "aca-update-failed", message },
-                        statusCode: StatusCodes.Status502BadGateway);
-                }
-
+                // AB#2354 — substrate adapter handles PaaS (ACA revision swap) and on-prem (SignalR dispatch).
+                await substrate.TriggerImageUpdateAsync(imageRef: string.Empty, ct);
                 return Results.Accepted($"/api/v1/platform/updates/check",
                     new UpdateApplyResponse(
                         UpdateId: updateId,
                         Status:   "Accepted",
-                        Message:  "ACA revision swap initiated"));
+                        Message:  substrate.Mode == SubstrateMode.PaaS
+                            ? "ACA revision swap initiated"
+                            : "Update dispatched to on-prem agent"));
             }
-            else
+            catch (Exception ex)
             {
-                var logger = loggerFactory.CreateLogger(nameof(PlatformUpdateEndpoints));
-                // On-prem path: broadcast to all runner agents connected to the platform group.
-                await hub.Clients
-                    .Group("platform:runners")
-                    .SendAsync("platform:update", new { updateId, requestedAt = DateTimeOffset.UtcNow }, ct);
-
-                logger.LogInformation(
-                    "Platform update dispatched to on-prem runner group. UpdateId={UpdateId}", updateId);
-
-                return Results.Accepted($"/api/v1/platform/updates/check",
-                    new UpdateApplyResponse(
-                        UpdateId: updateId,
-                        Status:   "Accepted",
-                        Message:  "Update dispatched to on-prem agent"));
+                return Results.Json(
+                    new { error = "update-failed", message = ex.Message },
+                    statusCode: StatusCodes.Status502BadGateway);
             }
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:admin")))
@@ -223,58 +195,4 @@ public static class PlatformUpdateEndpoints
         }
     }
 
-    /// <summary>
-    /// Triggers an ACA image update for <c>ca-cloudsmith-api</c> using DefaultAzureCredential
-    /// against the ARM SDK. Expects the env vars AZURE_SUBSCRIPTION_ID and
-    /// CLOUDSMITH_ACA_RESOURCE_GROUP to be set at deploy time.
-    /// Returns (true, message) on success, (false, errorMessage) on failure.
-    /// </summary>
-    private static async Task<(bool Success, string Message)> ApplyAcaUpdateAsync(
-        ILogger logger,
-        CancellationToken ct)
-    {
-        try
-        {
-            var subscriptionId = Environment.GetEnvironmentVariable("AZURE_SUBSCRIPTION_ID");
-            var resourceGroup  = Environment.GetEnvironmentVariable("CLOUDSMITH_ACA_RESOURCE_GROUP");
-
-            if (string.IsNullOrWhiteSpace(subscriptionId) || string.IsNullOrWhiteSpace(resourceGroup))
-            {
-                return (false,
-                    "AZURE_SUBSCRIPTION_ID and CLOUDSMITH_ACA_RESOURCE_GROUP must be set for PaaS update.");
-            }
-
-            var credential = new DefaultAzureCredential();
-            var armClient  = new ArmClient(credential);
-
-            // Build the resource ID for ca-cloudsmith-api and locate it.
-            const string apiAppName = "ca-cloudsmith-api";
-            var appId = ContainerAppResource.CreateResourceIdentifier(
-                subscriptionId, resourceGroup, apiAppName);
-
-            var apiApp = armClient.GetContainerAppResource(appId);
-
-            // Fetch the current data so we can issue a no-op patch that forces a
-            // new revision to be created against the same :latest tag.
-            var current = await apiApp.GetAsync(ct).ConfigureAwait(false);
-            var patchData = current.Value.Data;
-
-            // Issue the update — ACA creates a new revision that re-resolves :latest.
-            var updateOp = await apiApp.UpdateAsync(
-                Azure.WaitUntil.Started,
-                patchData,
-                ct).ConfigureAwait(false);
-
-            logger.LogInformation(
-                "ACA revision swap initiated for {AppName}. OperationId={OperationId}",
-                apiAppName, updateOp.Id);
-
-            return (true, "ACA revision swap initiated");
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "ACA update failed");
-            return (false, $"ACA update failed: {ex.Message}");
-        }
-    }
 }

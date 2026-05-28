@@ -4,6 +4,7 @@
 using System.Security.Claims;
 using CloudSmith.Api.Services;
 using CloudSmith.Core.Setup;
+using CloudSmith.Core.Substrate;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
@@ -51,22 +52,11 @@ public static class SetupEndpoints
             CompleteSetupRequest req,
             SetupService setup,
             MasterSecretsKeyBootstrap bootstrap,
+            ISubstrateAdapter substrate,
             CancellationToken ct) =>
         {
-            // Validate the one-time initial admin token (C2 — enforces TTL).
-            // AB#2349 / ADR-047 amendment: errors include the substrate-specific
-            // retrieval command so operators are not stuck guessing how to find the token.
-            var isPaaS = string.Equals(
-                Environment.GetEnvironmentVariable("CLOUDSMITH_DEPLOYMENT_MODE"),
-                "paas",
-                StringComparison.OrdinalIgnoreCase);
-            var kvName = Environment.GetEnvironmentVariable("CLOUDSMITH_KEY_VAULT_NAME");
-
-            string retrievalHint = isPaaS && !string.IsNullOrWhiteSpace(kvName)
-                ? $"Retrieve with: az keyvault secret show --vault-name {kvName} --name cloudsmith-initial-admin-token --query value -o tsv"
-                : isPaaS
-                    ? "Retrieve from the API container at /etc/cloudsmith/initial-admin-token.txt (CLOUDSMITH_KEY_VAULT_NAME is not configured — set it via Bicep for KV-based retrieval)."
-                    : "Retrieve from the host VM at /etc/cloudsmith/initial-admin-token.txt (Linux, mode 600) or %PROGRAMDATA%\\CloudSmith\\initial-admin-token.txt (Windows).";
+            // AB#2354 — retrieval hint is now substrate-aware via the adapter.
+            string retrievalHint = substrate.GetOperatorRetrievalHint("cloudsmith-initial-admin-token");
 
             if (string.IsNullOrWhiteSpace(req.InitialAdminToken))
             {
