@@ -71,7 +71,7 @@ internal sealed class PaaSAdapter : ISubstrateAdapter
 
     // ---- Operator artifacts -------------------------------------------------
 
-    public async Task WriteOperatorArtifactAsync(string logicalName, string content, ArtifactKind kind, CancellationToken ct = default)
+    public async Task WriteOperatorArtifactAsync(string logicalName, string content, ArtifactKind kind, DateTimeOffset? expiresOn = null, CancellationToken ct = default)
     {
         // All artifact kinds on PaaS go to KV with a kind tag.
         var secret = new KeyVaultSecret(logicalName, content)
@@ -79,6 +79,7 @@ internal sealed class PaaSAdapter : ISubstrateAdapter
             Properties =
             {
                 ContentType = "text/plain",
+                ExpiresOn   = expiresOn,
             }
         };
         secret.Properties.Tags["managed-by"] = "cloudsmith-api";

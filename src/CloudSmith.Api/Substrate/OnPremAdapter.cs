@@ -70,7 +70,7 @@ internal sealed class OnPremAdapter : ISubstrateAdapter
 
     // ---- Operator artifacts -------------------------------------------------
 
-    public Task WriteOperatorArtifactAsync(string logicalName, string content, ArtifactKind kind, CancellationToken ct = default)
+    public Task WriteOperatorArtifactAsync(string logicalName, string content, ArtifactKind kind, DateTimeOffset? expiresOn = null, CancellationToken ct = default)
     {
         switch (kind)
         {

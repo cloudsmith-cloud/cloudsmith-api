@@ -230,8 +230,8 @@ public sealed class MasterSecretsKeyBootstrap : IHostedService
         await AppendAuditRowAsync(conn, "initial_admin_token_issued",
             afterJson: $"{{\"expires_at\":\"{expiry:o}\"}}", ct);
 
-        // AB#2354 — delegate write to the substrate adapter (PaaS → KV; on-prem → restricted file).
-        await _substrate.WriteOperatorArtifactAsync(InitialTokenSecretName, token, ArtifactKind.Secret, ct);
+        // AB#2350 — delegate write to the substrate adapter with TTL (PaaS → KV secret with 24h expiry; on-prem → restricted file).
+        await _substrate.WriteOperatorArtifactAsync(InitialTokenSecretName, token, ArtifactKind.Secret, expiry, ct);
 
         // Only the retrieval hint goes to stdout — never the token value itself.
         Console.WriteLine($"[CloudSmith] Initial admin token written. Retrieve with: {_substrate.GetOperatorRetrievalHint(InitialTokenSecretName)}");
