@@ -12,6 +12,7 @@ using CloudSmith.Core.Substrate;
 using CloudSmith.Api.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.SignalR;
 using System.Threading.RateLimiting;
 using CloudSmith.ClusterMgmt;
 using CloudSmith.ClusterMgmt.Services;
