@@ -85,6 +85,16 @@ static string ResolveConnectionString(Microsoft.Extensions.Configuration.IConfig
     if (raw is null)
         throw new InvalidOperationException("CS-CORE-ERR-001: Required configuration 'ConnectionStrings:Default' is missing");
 
+    // AB#2372 — Security: reject any connection string containing TrustServerCertificate=true.
+    // Certificate validation must never be bypassed in any environment; use proper CA trust instead.
+    if (raw.Contains("TrustServerCertificate=true", StringComparison.OrdinalIgnoreCase) ||
+        raw.Contains("Trust Server Certificate=true", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException(
+            "CS-CORE-ERR-002: Connection string must not contain 'TrustServerCertificate=true'. " +
+            "Configure proper certificate trust via the CA bundle instead.");
+    }
+
     // If the value looks like a full Npgsql connection string (contains Host= or ;), use as-is.
     if (raw.Contains('=') || raw.Contains(';'))
         return raw;
@@ -312,7 +322,12 @@ app.UseWebSockets(new WebSocketOptions
     KeepAliveInterval = TimeSpan.FromSeconds(60),
 });
 
-// Rate limiting — must come before routing so the middleware fires on all matched routes.
+// AB#2377 — UseRouting must be called before UseRateLimiter so that the rate-limiter
+// middleware can inspect the matched endpoint's metadata (e.g. per-policy attributes)
+// and correctly apply per-route policies set via RequireRateLimiting().
+app.UseRouting();
+
+// Rate limiting — must come after UseRouting so endpoint metadata is available.
 app.UseRateLimiter();
 
 // SEC-H1 — CORS must run before authentication so that preflight OPTIONS requests
@@ -375,10 +390,10 @@ app.MapPlatformUpdateEndpoints();           // AB#1952 GET /api/v1/platform/upda
 // Browser WebSocket auth: pass access_token query param (SignalR convention).
 app.MapHub<PlatformHub>("/hubs/platform");
 
-// SEC-M2 — OpenAPI / Scalar docs: exposed in development or when explicitly opted-in.
-// Set CLOUDSMITH_ENABLE_SWAGGER=true in production to allow access for debugging.
-if (app.Environment.IsDevelopment() ||
-    string.Equals(Environment.GetEnvironmentVariable("CLOUDSMITH_ENABLE_SWAGGER"), "true", StringComparison.OrdinalIgnoreCase))
+// AB#2373 — OpenAPI / Scalar docs: strictly development-only.
+// These endpoints must never be reachable in production ACA deployments.
+// The CLOUDSMITH_ENABLE_SWAGGER escape hatch has been removed (SEC-M2 fix).
+if (app.Environment.IsDevelopment())
 {
     // Primary endpoint: /openapi/v1.json (ASP.NET Core 9 default)
     app.MapOpenApi();
