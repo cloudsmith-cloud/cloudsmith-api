@@ -252,16 +252,21 @@ if (!string.Equals(Environment.GetEnvironmentVariable("CLOUDSMITH_SKIP_MIGRATION
 }
 
 // Trust X-Forwarded-* headers from nginx reverse proxy.
-// KnownNetworks/KnownProxies default to loopback only; the portal nginx runs in a
-// separate container (non-loopback IP), so clear them to trust the forwarded headers
-// (incl. X-Forwarded-Host) it sets — required for correct OIDC redirect_uri and
-// same-origin auth cookie behind the portal reverse proxy on ACA.
+// ACA routes all internal traffic through RFC-1918 private ranges; restrict
+// proxy trust to those ranges rather than clearing KnownNetworks/KnownProxies
+// entirely, which would allow any client to spoof X-Forwarded-For.
 var forwardedHeadersOptions = new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost
 };
 forwardedHeadersOptions.KnownNetworks.Clear();
 forwardedHeadersOptions.KnownProxies.Clear();
+// Allow all RFC-1918 private ranges — ACA ingress/sidecar IPs are always
+// in one of these blocks; public internet traffic never reaches the ACA
+// internal endpoint directly so spoofing via a public source is not possible.
+forwardedHeadersOptions.KnownNetworks.Add(new IPNetwork(System.Net.IPAddress.Parse("10.0.0.0"), 8));
+forwardedHeadersOptions.KnownNetworks.Add(new IPNetwork(System.Net.IPAddress.Parse("172.16.0.0"), 12));
+forwardedHeadersOptions.KnownNetworks.Add(new IPNetwork(System.Net.IPAddress.Parse("192.168.0.0"), 16));
 app.UseForwardedHeaders(forwardedHeadersOptions);
 
 // WebSocket support — must be registered before the endpoint middleware so that

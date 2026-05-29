@@ -105,13 +105,15 @@ internal sealed class PaaSAdapter : ISubstrateAdapter
             throw new InvalidOperationException(
                 "AZURE_SUBSCRIPTION_ID and CLOUDSMITH_ACA_RESOURCE_GROUP must be set for PaaS image update.");
 
+        var acaAppName = Environment.GetEnvironmentVariable("CLOUDSMITH_ACA_APP_NAME") ?? "ca-cloudsmith-api";
+
         var armClient = new ArmClient(new DefaultAzureCredential());
-        var appId     = ContainerAppResource.CreateResourceIdentifier(subscriptionId, resourceGroup, "ca-cloudsmith-api");
+        var appId     = ContainerAppResource.CreateResourceIdentifier(subscriptionId, resourceGroup, acaAppName);
         var apiApp    = armClient.GetContainerAppResource(appId);
         var current   = await apiApp.GetAsync(ct).ConfigureAwait(false);
 
         await apiApp.UpdateAsync(Azure.WaitUntil.Started, current.Value.Data, ct).ConfigureAwait(false);
-        _logger.LogInformation("ACA revision swap initiated for ca-cloudsmith-api.");
+        _logger.LogInformation("ACA revision swap initiated for {AcaAppName}.", acaAppName);
     }
 
     // ---- Host info ----------------------------------------------------------
