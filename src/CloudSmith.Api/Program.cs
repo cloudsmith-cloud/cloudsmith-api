@@ -98,7 +98,7 @@ static string ResolveConnectionString(Microsoft.Extensions.Configuration.IConfig
     // pgbouncer listens on localhost without SSL; Azure PG Flexible requires SSL but
     // when pgbouncer is the host we connect to localhost. Prefer falls back to plain when SSL fails.
     var sslMode  = host == "localhost" ? "Disable" : "Require";
-    return $"Host={host};Database={database};Username={user};Password={raw};SSL Mode={sslMode};Trust Server Certificate=true";
+    return $"Host={host};Database={database};Username={user};Password={raw};SSL Mode={sslMode}";
 }
 var connectionString = ResolveConnectionString(builder.Configuration);
 builder.Services.AddCloudSmithCore(connectionString);
@@ -126,6 +126,42 @@ builder.Services.AddCloudSmithMonitoring(opts =>
 // API-layer services
 builder.Services.AddCloudSmithAuthorization();
 builder.Services.AddOpenApi();
+
+// SEC-H1 — CORS policy.
+// Development: allow all localhost origins (portal dev servers on :3000/:5173 and others).
+// Production: restrict to the portal FQDN from CLOUDSMITH_PORTAL_URL env var.
+// Credentials are allowed for SignalR and cookie-based auth flows.
+builder.Services.AddCors(options =>
+{
+    if (builder.Environment.IsDevelopment())
+    {
+        options.AddDefaultPolicy(policy => policy
+            .SetIsOriginAllowed(origin =>
+            {
+                var uri = new Uri(origin);
+                return uri.Host == "localhost" || uri.Host == "127.0.0.1" || uri.Host == "[::1]";
+            })
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials());
+    }
+    else
+    {
+        var portalUrl = Environment.GetEnvironmentVariable("CLOUDSMITH_PORTAL_URL");
+        options.AddDefaultPolicy(policy =>
+        {
+            if (!string.IsNullOrWhiteSpace(portalUrl))
+                policy.WithOrigins(portalUrl.TrimEnd('/'));
+            else
+                // No portal URL configured — deny all cross-origin requests.
+                policy.WithOrigins(Array.Empty<string>());
+
+            policy.AllowAnyHeader()
+                  .AllowAnyMethod()
+                  .AllowCredentials();
+        });
+    }
+});
 
 // SignalR — PlatformHub for real-time portal and runner events (AB#1436).
 // JWT auth is handled by the ASP.NET Core auth middleware (same pipeline as REST);
@@ -279,6 +315,10 @@ app.UseWebSockets(new WebSocketOptions
 // Rate limiting — must come before routing so the middleware fires on all matched routes.
 app.UseRateLimiter();
 
+// SEC-H1 — CORS must run before authentication so that preflight OPTIONS requests
+// receive the correct Access-Control-Allow-* headers without requiring auth.
+app.UseCors();
+
 // Middleware (auth must come after routing, before endpoints)
 app.UseMiddleware<CorrelationIdMiddleware>();
 // ADR-047 — block all non-allowlisted API traffic until first-run setup is complete.
@@ -335,13 +375,18 @@ app.MapPlatformUpdateEndpoints();           // AB#1952 GET /api/v1/platform/upda
 // Browser WebSocket auth: pass access_token query param (SignalR convention).
 app.MapHub<PlatformHub>("/hubs/platform");
 
-// OpenAPI / Scalar docs
-// Primary endpoint: /openapi/v1.json (ASP.NET Core 9 default)
-app.MapOpenApi();
-// Swagger-compat alias: /swagger/v1/swagger.json — AB#1440
-// Allows tooling that expects the Swashbuckle path to resolve the spec.
-app.MapOpenApi("/swagger/v1/swagger.json");
-app.MapScalarApiReference();
+// SEC-M2 — OpenAPI / Scalar docs: exposed in development or when explicitly opted-in.
+// Set CLOUDSMITH_ENABLE_SWAGGER=true in production to allow access for debugging.
+if (app.Environment.IsDevelopment() ||
+    string.Equals(Environment.GetEnvironmentVariable("CLOUDSMITH_ENABLE_SWAGGER"), "true", StringComparison.OrdinalIgnoreCase))
+{
+    // Primary endpoint: /openapi/v1.json (ASP.NET Core 9 default)
+    app.MapOpenApi();
+    // Swagger-compat alias: /swagger/v1/swagger.json — AB#1440
+    // Allows tooling that expects the Swashbuckle path to resolve the spec.
+    app.MapOpenApi("/swagger/v1/swagger.json");
+    app.MapScalarApiReference();
+}
 
 app.Run();
 
