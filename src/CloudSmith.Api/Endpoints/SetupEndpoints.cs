@@ -3,6 +3,7 @@
 
 using System.Security.Claims;
 using CloudSmith.Api.Services;
+using CloudSmith.Api.Substrate;
 using CloudSmith.Core.Setup;
 using CloudSmith.Core.Substrate;
 using Microsoft.AspNetCore.Authentication;
@@ -33,7 +34,22 @@ public static class SetupEndpoints
         /// One-time initial admin token written to the secrets file on first boot.
         /// Required — rejected with 401 if absent, 410 if expired, 401 if invalid.
         /// </summary>
-        string? InitialAdminToken);
+        string? InitialAdminToken,
+        /// <summary>
+        /// AB#2412 — When true and running on PaaS, the API will attempt to create an
+        /// Entra app registration automatically via Microsoft Graph using the ACA Managed
+        /// Identity. Requires the MI to hold the Entra Application Administrator role.
+        /// If auto-create is not possible (missing permissions or non-PaaS substrate),
+        /// setup still completes and the response includes <c>entraAutoCreateError</c>
+        /// and <c>entraManualInstructions</c> so the operator can create the app manually.
+        /// </summary>
+        bool? AutoCreateAppRegistration,
+        /// <summary>
+        /// Public FQDN of the portal (e.g. "myplatform.azurecontainerapps.io").
+        /// Required when <see cref="AutoCreateAppRegistration"/> is true.
+        /// Used to set the Entra redirect URI to "https://{PortalFqdn}/signin-oidc".
+        /// </summary>
+        string? PortalFqdn);
 
     public sealed record LocalLoginRequest(string Username, string Password);
 
@@ -48,11 +64,13 @@ public static class SetupEndpoints
 
         // Anonymous — performs first-run setup once; 409 if already complete.
         // C2: rate-limited (5 attempts per 15 min per IP) and validates the initial admin token.
+        // AB#2412: optional autoCreateAppRegistration flag — provisions Entra app via Graph MI.
         app.MapPost("/api/v1/setup", async (
             CompleteSetupRequest req,
             SetupService setup,
             MasterSecretsKeyBootstrap bootstrap,
             ISubstrateAdapter substrate,
+            IHttpClientFactory httpClientFactory,
             CancellationToken ct) =>
         {
             // AB#2354 — retrieval hint is now substrate-aware via the adapter.
@@ -96,6 +114,55 @@ public static class SetupEndpoints
                         statusCode: StatusCodes.Status401Unauthorized);
             }
 
+            // AB#2412 — Entra auto-create via Managed Identity Graph call.
+            // Attempted before completing setup so a Graph error still returns before setup is
+            // marked complete — the operator can then fix permissions and retry.
+            // Non-fatal: if auto-create fails we include the error in the response but still
+            // complete setup so the operator can configure Entra manually afterward.
+            string? entraClientId      = null;
+            string? entraTenantId      = null;
+            string? entraClientSecret  = null;
+            string? entraAutoCreateError       = null;
+            string? entraManualInstructions    = null;
+
+            var wantAutoCreate = req.AutoCreateAppRegistration ?? false;
+            var doAutoCreate   = wantAutoCreate
+                                 && substrate is PaaSAdapter
+                                 && !string.IsNullOrWhiteSpace(req.PortalFqdn);
+
+            if (doAutoCreate)
+            {
+                var paasAdapter = (PaaSAdapter)substrate;
+                var entraResult = await paasAdapter.TryCreateEntraAppRegistrationAsync(
+                    req.PortalFqdn!, httpClientFactory, ct);
+
+                if (entraResult.Success)
+                {
+                    entraClientId     = entraResult.ClientId;
+                    entraTenantId     = entraResult.TenantId;
+                    entraClientSecret = entraResult.ClientSecret;
+
+                    // Persist the credentials into Key Vault so the platform can use them after setup.
+                    await substrate.SetSecretAsync("cloudsmith-entra-client-id",     entraClientId!,     ct: ct);
+                    await substrate.SetSecretAsync("cloudsmith-entra-tenant-id",     entraTenantId!,     ct: ct);
+                    await substrate.SetSecretAsync("cloudsmith-entra-client-secret", entraClientSecret!, ct: ct);
+                }
+                else
+                {
+                    entraAutoCreateError    = entraResult.Error;
+                    entraManualInstructions = entraResult.ManualInstructions;
+                }
+            }
+            else if (wantAutoCreate && substrate is not PaaSAdapter)
+            {
+                entraAutoCreateError = "autoCreateAppRegistration is only supported on PaaS deployments. " +
+                                       "Configure Entra manually using the platform identity provider settings.";
+            }
+            else if (wantAutoCreate && string.IsNullOrWhiteSpace(req.PortalFqdn))
+            {
+                entraAutoCreateError = "portalFqdn is required when autoCreateAppRegistration=true.";
+            }
+
             try
             {
                 await setup.CompleteSetupAsync(
@@ -105,7 +172,16 @@ public static class SetupEndpoints
                 // Revoke the one-time token now that setup is complete.
                 await bootstrap.RevokeInitialAdminTokenAsync(ct);
 
-                return Results.Ok(new { setupComplete = true });
+                return Results.Ok(new
+                {
+                    setupComplete          = true,
+                    entraClientId,
+                    entraTenantId,
+                    // clientSecret is returned once here — not stored in the response body after this call.
+                    entraClientSecret,
+                    entraAutoCreateError,
+                    entraManualInstructions,
+                });
             }
             catch (InvalidOperationException ex)
             {
