@@ -112,7 +112,12 @@ internal sealed class PaaSAdapter : ISubstrateAdapter
             throw new InvalidOperationException(
                 "AZURE_SUBSCRIPTION_ID and CLOUDSMITH_ACA_RESOURCE_GROUP must be set for PaaS image update.");
 
-        var acaAppName = Environment.GetEnvironmentVariable("CLOUDSMITH_ACA_APP_NAME") ?? "ca-cloudsmith-api";
+        var acaAppName = Environment.GetEnvironmentVariable("CLOUDSMITH_ACA_APP_NAME");
+
+        if (string.IsNullOrWhiteSpace(acaAppName))
+            throw new InvalidOperationException(
+                "CLOUDSMITH_ACA_APP_NAME must be set for PaaS image update. " +
+                "Set it to the ACA app name (e.g. 'ca-cloudsmith-api-<suffix>').");
 
         var armClient = new ArmClient(new DefaultAzureCredential());
         var appId     = ContainerAppResource.CreateResourceIdentifier(subscriptionId, resourceGroup, acaAppName);

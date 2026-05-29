@@ -137,9 +137,11 @@ builder.Services.AddCloudSmithMonitoring(opts =>
 builder.Services.AddCloudSmithAuthorization();
 builder.Services.AddOpenApi();
 
-// SEC-H1 — CORS policy.
+// SEC-H1 / AB#2408 — CORS policy.
 // Development: allow all localhost origins (portal dev servers on :3000/:5173 and others).
-// Production: restrict to the portal FQDN from CLOUDSMITH_PORTAL_URL env var.
+// Production: restrict to the portal ACA FQDN.
+//   Primary env var:  CLOUDSMITH_PORTAL_ORIGIN  (e.g. "https://ca-cloudsmith-portal-xyz.azurecontainerapps.io")
+//   Fallback env var: CLOUDSMITH_PORTAL_URL      (legacy — kept for backward compatibility)
 // Credentials are allowed for SignalR and cookie-based auth flows.
 builder.Services.AddCors(options =>
 {
@@ -157,13 +159,16 @@ builder.Services.AddCors(options =>
     }
     else
     {
-        var portalUrl = Environment.GetEnvironmentVariable("CLOUDSMITH_PORTAL_URL");
+        // Prefer CLOUDSMITH_PORTAL_ORIGIN; fall back to CLOUDSMITH_PORTAL_URL for existing deploys.
+        var portalOrigin = Environment.GetEnvironmentVariable("CLOUDSMITH_PORTAL_ORIGIN")
+                        ?? Environment.GetEnvironmentVariable("CLOUDSMITH_PORTAL_URL");
+
         options.AddDefaultPolicy(policy =>
         {
-            if (!string.IsNullOrWhiteSpace(portalUrl))
-                policy.WithOrigins(portalUrl.TrimEnd('/'));
+            if (!string.IsNullOrWhiteSpace(portalOrigin))
+                policy.WithOrigins(portalOrigin.TrimEnd('/'));
             else
-                // No portal URL configured — deny all cross-origin requests.
+                // No portal origin configured — deny all cross-origin requests.
                 policy.WithOrigins(Array.Empty<string>());
 
             policy.AllowAnyHeader()
