@@ -31,11 +31,6 @@ public static class SetupEndpoints
         string PlatformName, string PublicUrl, string AdminUsername,
         string? AdminEmail, string AdminPassword, string? Timezone,
         /// <summary>
-        /// One-time initial admin token written to the secrets file on first boot.
-        /// Required — rejected with 401 if absent, 410 if expired, 401 if invalid.
-        /// </summary>
-        string? InitialAdminToken,
-        /// <summary>
         /// AB#2412 — When true and running on PaaS, the API will attempt to create an
         /// Entra app registration automatically via Microsoft Graph using the ACA Managed
         /// Identity. Requires the MI to hold the Entra Application Administrator role.
@@ -63,56 +58,15 @@ public static class SetupEndpoints
         });
 
         // Anonymous — performs first-run setup once; 409 if already complete.
-        // C2: rate-limited (5 attempts per 15 min per IP) and validates the initial admin token.
+        // Rate-limited (5 attempts per 15 min per IP).
         // AB#2412: optional autoCreateAppRegistration flag — provisions Entra app via Graph MI.
         app.MapPost("/api/v1/setup", async (
             CompleteSetupRequest req,
             SetupService setup,
-            MasterSecretsKeyBootstrap bootstrap,
             ISubstrateAdapter substrate,
             IHttpClientFactory httpClientFactory,
             CancellationToken ct) =>
         {
-            // AB#2354 — retrieval hint is now substrate-aware via the adapter.
-            string retrievalHint = substrate.GetOperatorRetrievalHint("cloudsmith-initial-admin-token");
-
-            if (string.IsNullOrWhiteSpace(req.InitialAdminToken))
-            {
-                return Results.Json(
-                    new
-                    {
-                        error          = "token-required",
-                        message        = "A valid initial admin token is required to complete setup.",
-                        howToRetrieve  = retrievalHint,
-                        ttlHours       = 24,
-                    },
-                    statusCode: StatusCodes.Status401Unauthorized);
-            }
-
-            var tokenResult = await bootstrap.ValidateInitialAdminTokenAsync(req.InitialAdminToken, ct);
-            switch (tokenResult)
-            {
-                case TokenValidationResult.Expired:
-                    return Results.Json(
-                        new
-                        {
-                            error         = "token-expired",
-                            message       = "The initial admin token has expired (24-hour TTL). Restart the CloudSmith service to generate a fresh token.",
-                            howToRecover  = retrievalHint,
-                        },
-                        statusCode: StatusCodes.Status410Gone);
-
-                case TokenValidationResult.NotFound:
-                case TokenValidationResult.Invalid:
-                    return Results.Json(
-                        new
-                        {
-                            error          = "token-invalid",
-                            message        = "The supplied initial admin token does not match the one issued at first start (or it has already been consumed).",
-                            howToRetrieve  = retrievalHint,
-                        },
-                        statusCode: StatusCodes.Status401Unauthorized);
-            }
 
             // AB#2412 — Entra auto-create via Managed Identity Graph call.
             // Attempted before completing setup so a Graph error still returns before setup is
@@ -168,9 +122,6 @@ public static class SetupEndpoints
                 await setup.CompleteSetupAsync(
                     req.PlatformName, req.PublicUrl, req.AdminUsername,
                     req.AdminEmail ?? string.Empty, req.AdminPassword, req.Timezone, ct);
-
-                // Revoke the one-time token now that setup is complete.
-                await bootstrap.RevokeInitialAdminTokenAsync(ct);
 
                 return Results.Ok(new
                 {
