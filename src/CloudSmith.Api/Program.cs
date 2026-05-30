@@ -437,6 +437,8 @@ static void RunMigrations(string connectionString, System.Reflection.Assembly mi
         .BuildServiceProvider();
 #pragma warning restore ASP0000
 
+    // MigrateCloudSmithDatabase already retried up to 10× before reaching here,
+    // so by this point PG is confirmed reachable. No retry needed for module runners.
     using var scope = services.CreateScope();
     scope.ServiceProvider.GetRequiredService<IMigrationRunner>().MigrateUp();
 }
