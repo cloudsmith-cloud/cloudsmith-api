@@ -351,7 +351,7 @@ internal sealed class PaaSAdapter : ISubstrateAdapter
 
             // Pad to a valid base64url length.
             var payload = parts[1];
-            var padded  = payload.Length % 4 switch
+            var padded  = (payload.Length % 4) switch
             {
                 2 => payload + "==",
                 3 => payload + "=",
