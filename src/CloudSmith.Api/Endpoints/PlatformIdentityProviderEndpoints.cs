@@ -69,6 +69,20 @@ public static class PlatformIdentityProviderEndpoints
     {
         var group = app.MapGroup("/api/v1/platform/identity").WithTags("Platform");
 
+        // GET /api/v1/platform/identity — returns platform name, public URL, and setup state.
+        // Used by the portal top bar to display the operator-configured platform name.
+        group.MapGet("", async (SetupService setup, CancellationToken ct) =>
+        {
+            var status = await setup.GetStatusAsync(ct);
+            return Results.Ok(new
+            {
+                platformName = status.PlatformName,
+                publicUrl    = status.PublicUrl,
+                setupState   = status.SetupComplete ? "Completed" : "Pending",
+                timezone     = (string?)null,
+            });
+        });
+
         // POST /api/v1/platform/identity/consent-callback — AB#1934.
         // Anonymous redirect target after Entra OAuth admin-consent popup.
         // Broadcasts the authorization code to the portal via BroadcastChannel, then closes the popup.
