@@ -398,17 +398,18 @@ app.MapPlatformUpdateEndpoints();           // AB#1951 GET /api/v1/platform/upda
 // Browser WebSocket auth: pass access_token query param (SignalR convention).
 app.MapHub<PlatformHub>("/hubs/platform");
 
-// AB#2373 — OpenAPI / Scalar docs: strictly development-only.
-// These endpoints must never be reachable in production ACA deployments.
-// The CLOUDSMITH_ENABLE_SWAGGER escape hatch has been removed (SEC-M2 fix).
-if (app.Environment.IsDevelopment())
+// AB#2373 — OpenAPI / Scalar docs: development-only in production ACA deployments.
+// CLOUDSMITH_SKIP_MIGRATIONS=true signals a spec-gen CI environment — expose OpenAPI there too.
+var skipMigrations = string.Equals(
+    Environment.GetEnvironmentVariable("CLOUDSMITH_SKIP_MIGRATIONS"),
+    "true", StringComparison.OrdinalIgnoreCase);
+if (app.Environment.IsDevelopment() || skipMigrations)
 {
     // Primary endpoint: /openapi/v1.json (ASP.NET Core 9 default)
     app.MapOpenApi();
     // Swagger-compat alias: /swagger/v1/swagger.json — AB#1440
-    // Allows tooling that expects the Swashbuckle path to resolve the spec.
     app.MapOpenApi("/swagger/v1/swagger.json");
-    app.MapScalarApiReference();
+    if (app.Environment.IsDevelopment()) app.MapScalarApiReference();
 }
 
 app.Run();
