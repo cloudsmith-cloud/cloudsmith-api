@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using CloudSmith.Api.Authorization;
+using CloudSmith.Api.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -28,6 +31,12 @@ public static class SitesEndpoints
     public sealed record CreateSiteRequest(string Name, string? Description, string? Location, Guid? RelayId);
 
     public sealed record UpdateSiteRequest(string? Name, string? Description, string? Location);
+
+    /// <summary>AB#2485 — relay enrollment token issued per-site for the install script.</summary>
+    public sealed record SiteRelayEnrollmentTokenResponse(
+        string EnrollmentToken,
+        string InstallCommand,
+        string ExpiresAt);
 
     public static IEndpointRouteBuilder MapSitesEndpoints(this IEndpointRouteBuilder app)
     {
@@ -326,6 +335,78 @@ public static class SitesEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
         .WithSummary("Physically delete a site (sites have no audit-trail requirement).");
+
+        // POST /api/v1/platform/sites/{siteId}/relay-token — AB#2485.
+        // Issues a single-use relay enrollment JWT (1h TTL, scope=relay:enroll) scoped to this site.
+        // Used by the cloudsmith-installer relay install script as the --api-key argument.
+        // Requires platform:admin or site:manage permission.
+        group.MapPost("/{siteId:guid}/relay-token", async (
+            Guid siteId,
+            HttpContext ctx,
+            NpgsqlDataSource db,
+            MasterSecretsKeyBootstrap bootstrap,
+            CancellationToken ct) =>
+        {
+            if (!TryGetOrgId(ctx, out var orgId, out var orgError))
+                return orgError!;
+
+            // Verify the site exists and belongs to this org.
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using (var checkCmd = new NpgsqlCommand(
+                "SELECT site_id FROM core.sites WHERE org_id = @org_id AND site_id = @site_id",
+                conn))
+            {
+                checkCmd.Parameters.AddWithValue("@org_id", orgId);
+                checkCmd.Parameters.AddWithValue("@site_id", siteId);
+                var found = await checkCmd.ExecuteScalarAsync(ct);
+                if (found is null || found is DBNull)
+                {
+                    return Results.NotFound(new { error = "site-not-found", siteId });
+                }
+            }
+
+            // Issue enrollment JWT: 1h TTL, scope=relay:enroll, single-use semantics are
+            // enforced by the relay installer consuming the token on first call to /enroll.
+            var keyBytes = bootstrap.LoadMasterKey() ?? RandomNumberGenerator.GetBytes(32);
+            var now      = DateTimeOffset.UtcNow;
+            var exp      = now.AddHours(1);
+
+            static string B64Url(byte[] bytes) =>
+                Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+            var header      = B64Url(Encoding.UTF8.GetBytes("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"));
+            var payloadJson = string.Concat(
+                "{\"iss\":\"cloudsmith-api\"",
+                $",\"org_id\":\"{orgId}\"",
+                $",\"site_id\":\"{siteId}\"",
+                ",\"scope\":\"relay:enroll\"",
+                $",\"iat\":{now.ToUnixTimeSeconds()}",
+                $",\"exp\":{exp.ToUnixTimeSeconds()}",
+                "}");
+            var payload      = B64Url(Encoding.UTF8.GetBytes(payloadJson));
+            var signingInput = $"{header}.{payload}";
+            using var hmac   = new HMACSHA256(keyBytes);
+            var sig          = B64Url(hmac.ComputeHash(Encoding.UTF8.GetBytes(signingInput)));
+            var enrollToken  = $"{signingInput}.{sig}";
+
+            // Build the install command. The API URL is derived from request context.
+            var scheme   = ctx.Request.Scheme;
+            var host     = ctx.Request.Host.Value;
+            var apiUrl   = $"{scheme}://{host}";
+            var installCommand = string.Concat(
+                "curl -sSL https://raw.githubusercontent.com/cloudsmith-cloud/cloudsmith-installer/main/scripts/install-relay.sh",
+                " | bash -s --",
+                $" --api-url {apiUrl}",
+                $" --api-key {enrollToken}",
+                $" --site-id {siteId}");
+
+            return Results.Ok(new SiteRelayEnrollmentTokenResponse(
+                EnrollmentToken: enrollToken,
+                InstallCommand:  installCommand,
+                ExpiresAt:       exp.ToString("o")));
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:admin")))
+        .WithSummary("AB#2485 — Issue a single-use 1h relay enrollment JWT for the site install script. Requires platform:admin.");
 
         return app;
     }
