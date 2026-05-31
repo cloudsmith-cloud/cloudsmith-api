@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Relay;
+using CloudSmith.Api.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -35,15 +36,16 @@ namespace CloudSmith.Api.Endpoints;
 ///     and /api/v1/health/probe-result on a schedule.
 ///
 /// Endpoint summary:
-///   POST   /api/v1/relays/enroll-token        platform:write    issue 1h enrollment token
-///   POST   /api/v1/relays/enroll              (anonymous)       Relay first-call — token is the credential
-///   GET    /api/v1/relays                     platform:read     list relays for the caller's org
-///   GET    /api/v1/relays/{relayId}           platform:read     detail
-///   DELETE /api/v1/relays/{relayId}           platform:write    revoke (status='revoked')
-///   GET    /api/v1/relays/{relayId}/connect   (relay-identity)  persistent WebSocket hub (AB#1679)
-///   POST   /api/v1/clusters                   platform:write    register cluster (relay or operator)
-///   POST   /api/v1/inventory/ingest           inventory:write   Relay pushes a batch of VM rows
-///   POST   /api/v1/health/probe-result        monitoring:write  Relay pushes a cluster health probe
+///   POST   /api/v1/relays/enroll-token              platform:write    issue 1h enrollment token
+///   POST   /api/v1/relays/enroll                    (anonymous)       Relay first-call — token is the credential
+///   GET    /api/v1/relays                           platform:read     list relays for the caller's org
+///   GET    /api/v1/relays/{relayId}                 platform:read     detail
+///   DELETE /api/v1/relays/{relayId}                 platform:write    revoke (status='revoked')
+///   GET    /api/v1/relays/{relayId}/connect         (relay-identity)  persistent WebSocket hub (AB#1679, AB#2491)
+///   POST   /api/v1/relays/{relayId}/token/refresh   (relay-identity)  refresh scoped relay JWT (AB#2491)
+///   POST   /api/v1/clusters                         platform:write    register cluster (relay or operator)
+///   POST   /api/v1/inventory/ingest                 inventory:write   Relay pushes a batch of VM rows
+///   POST   /api/v1/health/probe-result              monitoring:write  Relay pushes a cluster health probe
 /// </summary>
 public static class RelayEndpoints
 {
@@ -76,6 +78,8 @@ public static class RelayEndpoints
         string Status,
         string EnrolledAt,
         string? LastSeenAt);
+
+    public sealed record RelayTokenResponse(string Token, string ExpiresAt);
 
     public sealed record RegisterClusterRequest(string Name, Guid? SiteId, string ClusterType, Guid? RelayId);
 
@@ -435,10 +439,15 @@ public static class RelayEndpoints
         .AllowAnonymous()
         .WithSummary("REST heartbeat — updates last_seen_at and optionally site_id. Authenticated via X-CloudSmith-RelayId header.");
 
-        // GET /api/v1/relays/{relayId}/connect — persistent WebSocket hub (AB#1679).
+        // GET /api/v1/relays/{relayId}/connect — persistent WebSocket hub (AB#1679, AB#2491).
         // The Relay calls this after enrollment to establish the persistent data-plane
         // channel. Auth: X-CloudSmith-RelayId header must match the {relayId} path
         // segment, and the relay must exist in core.relays with status != 'revoked'.
+        // AB#2491 — challenge-response: the Relay must also present:
+        //   X-CloudSmith-Nonce     — random string (≥16 chars) chosen by the Relay
+        //   X-CloudSmith-Signature — base64(RSA-SHA256 of nonce bytes) with the relay's private key
+        // On success, the API returns the scoped relay JWT in the WebSocket upgrade response
+        // header X-CloudSmith-RelayToken (24h TTL, claims: relayId, siteId, scope=relay).
         // Inbound frame dispatch:
         //   inventory.push  → upsert inventory.virtual_machines (delegates to ingest logic)
         //   health.push     → update cluster_mgmt.clusters.status
@@ -450,6 +459,7 @@ public static class RelayEndpoints
             NpgsqlDataSource db,
             IConnectedRelayRegistry registry,
             ILoggerFactory loggerFactory,
+            MasterSecretsKeyBootstrap bootstrap,
             CancellationToken ct) =>
         {
             if (!ctx.WebSockets.IsWebSocketRequest)
@@ -470,11 +480,23 @@ public static class RelayEndpoints
                     statusCode: StatusCodes.Status401Unauthorized);
             }
 
-            // Verify relay exists and is not revoked.
+            // AB#2491 — challenge-response: read nonce and signature headers.
+            var nonce     = ctx.Request.Headers["X-CloudSmith-Nonce"].FirstOrDefault();
+            var sigBase64 = ctx.Request.Headers["X-CloudSmith-Signature"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(nonce) || string.IsNullOrWhiteSpace(sigBase64))
+            {
+                return Results.Json(
+                    new { error = "challenge-headers-missing", message = "X-CloudSmith-Nonce and X-CloudSmith-Signature headers are required." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Look up relay's public key and site_id.
             Guid orgId;
+            Guid? siteId;
+            string publicKeyPem;
             await using (var conn = await db.OpenConnectionAsync(ct))
             await using (var cmd = new NpgsqlCommand(
-                "SELECT org_id, status FROM core.relays WHERE relay_id = @relay_id",
+                "SELECT org_id, site_id, status, public_key_pem FROM core.relays WHERE relay_id = @relay_id",
                 conn))
             {
                 cmd.Parameters.AddWithValue("@relay_id", relayId);
@@ -485,8 +507,10 @@ public static class RelayEndpoints
                         new { error = "relay-not-found", relayId },
                         statusCode: StatusCodes.Status404NotFound);
                 }
-                orgId = reader.GetGuid(0);
-                var status = reader.GetString(1);
+                orgId         = reader.GetGuid(0);
+                siteId        = reader.IsDBNull(1) ? (Guid?)null : reader.GetGuid(1);
+                var status    = reader.GetString(2);
+                publicKeyPem  = reader.GetString(3);
                 if (string.Equals(status, "revoked", StringComparison.OrdinalIgnoreCase))
                 {
                     return Results.Json(
@@ -495,14 +519,29 @@ public static class RelayEndpoints
                 }
             }
 
+            // AB#2491 — verify RSA-SHA256 signature over the nonce using the relay's public key.
+            if (!VerifyRelaySignature(publicKeyPem, nonce, sigBase64))
+            {
+                return Results.Json(
+                    new { error = "signature-invalid", message = "X-CloudSmith-Signature verification failed." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // AB#2491 — issue scoped relay JWT (24h TTL).
+            var relayToken = IssueRelayJwt(bootstrap, relayId, orgId, siteId, scope: "relay");
+
             var logger = loggerFactory.CreateLogger("CloudSmith.Api.RelayWebSocket");
+
+            // Accept WebSocket; inject relay token in the response header before upgrade completes.
+            // ASP.NET Core WebSocket middleware forwards custom response headers set before AcceptWebSocketAsync.
+            ctx.Response.Headers["X-CloudSmith-RelayToken"] = relayToken;
             var ws = await ctx.WebSockets.AcceptWebSocketAsync();
             registry.Register(relayId.ToString(), ws);
 
             // Stamp initial last_seen_at on connect.
             await UpdateLastSeenAsync(db, relayId, ct);
 
-            logger.LogInformation("Relay {RelayId} (org {OrgId}) WebSocket connected", relayId, orgId);
+            logger.LogInformation("Relay {RelayId} (org {OrgId}) WebSocket connected (challenge verified)", relayId, orgId);
 
             try
             {
@@ -519,7 +558,87 @@ public static class RelayEndpoints
             return Results.Empty;
         })
         .AllowAnonymous()
-        .WithSummary("Persistent WebSocket hub — enrolled Relay connects here after enrollment (AB#1679).");
+        .WithSummary("Persistent WebSocket hub — enrolled Relay connects here after enrollment (AB#1679). AB#2491: challenge-response auth required; relay JWT returned in X-CloudSmith-RelayToken.");
+
+        // POST /api/v1/relays/{relayId}/token/refresh — AB#2491.
+        // Called by the relay on heartbeat when the current relay JWT is within 1 hour of expiry.
+        // Auth: same challenge-response proof as WebSocket connect (RelayId + Nonce + Signature headers).
+        // Returns a fresh 24h scoped relay JWT.
+        relays.MapPost("/{relayId:guid}/token/refresh", async (
+            Guid relayId,
+            HttpContext ctx,
+            NpgsqlDataSource db,
+            MasterSecretsKeyBootstrap bootstrap,
+            CancellationToken ct) =>
+        {
+            // Read challenge headers.
+            var headerRelayId = ctx.Request.Headers["X-CloudSmith-RelayId"].FirstOrDefault();
+            var nonce         = ctx.Request.Headers["X-CloudSmith-Nonce"].FirstOrDefault();
+            var sigBase64     = ctx.Request.Headers["X-CloudSmith-Signature"].FirstOrDefault();
+
+            if (string.IsNullOrWhiteSpace(headerRelayId)
+                || !Guid.TryParse(headerRelayId, out var headerGuid)
+                || headerGuid != relayId)
+            {
+                return Results.Json(
+                    new { error = "relay-identity-mismatch", message = "X-CloudSmith-RelayId header is missing or does not match the path relayId." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            if (string.IsNullOrWhiteSpace(nonce) || string.IsNullOrWhiteSpace(sigBase64))
+            {
+                return Results.Json(
+                    new { error = "challenge-headers-missing", message = "X-CloudSmith-Nonce and X-CloudSmith-Signature headers are required." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Look up relay.
+            Guid orgId;
+            Guid? siteId;
+            string publicKeyPem;
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using (var cmd = new NpgsqlCommand(
+                "SELECT org_id, site_id, status, public_key_pem FROM core.relays WHERE relay_id = @relay_id",
+                conn))
+            {
+                cmd.Parameters.AddWithValue("@relay_id", relayId);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                if (!await reader.ReadAsync(ct))
+                {
+                    return Results.Json(
+                        new { error = "relay-not-found", relayId },
+                        statusCode: StatusCodes.Status404NotFound);
+                }
+                orgId        = reader.GetGuid(0);
+                siteId       = reader.IsDBNull(1) ? (Guid?)null : reader.GetGuid(1);
+                var status   = reader.GetString(2);
+                publicKeyPem = reader.GetString(3);
+                if (string.Equals(status, "revoked", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Results.Json(
+                        new { error = "relay-revoked", relayId },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+            }
+
+            // Verify signature.
+            if (!VerifyRelaySignature(publicKeyPem, nonce, sigBase64))
+            {
+                return Results.Json(
+                    new { error = "signature-invalid", message = "X-CloudSmith-Signature verification failed." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Issue fresh token and update last_seen_at.
+            var token     = IssueRelayJwt(bootstrap, relayId, orgId, siteId, scope: "relay");
+            var expiresAt = DateTime.UtcNow.AddHours(24);
+
+            await UpdateLastSeenAsync(db, relayId, ct);
+
+            return Results.Ok(new RelayTokenResponse(Token: token, ExpiresAt: expiresAt.ToString("o")));
+        })
+        .AllowAnonymous()
+        .WithSummary("AB#2491 — Refresh scoped relay JWT (24h TTL). Called by relay on heartbeat when token nears expiry.");
 
         // POST /api/v1/clusters — register a cluster (relay-side or operator-side).
         // Note: the legacy POST /api/v1/clusters on ClusterEndpoints was removed in
@@ -710,6 +829,74 @@ public static class RelayEndpoints
         .WithSummary("Relay-side push of a cluster health probe (updates cluster status + last_health_check).");
 
         return app;
+    }
+
+    // -------------------------------------------------------------------------
+    // AB#2491 — Challenge-response auth + scoped JWT helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Verifies an RSA-SHA256 signature over the nonce using the relay's stored public key.
+    /// Returns <see langword="false"/> if the PEM is malformed, the signature is invalid,
+    /// or any other cryptographic error occurs.
+    /// </summary>
+    private static bool VerifyRelaySignature(string publicKeyPem, string nonce, string signatureBase64)
+    {
+        try
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(publicKeyPem);
+            var nonceBytes = Encoding.UTF8.GetBytes(nonce);
+            var signature  = Convert.FromBase64String(signatureBase64);
+            return rsa.VerifyData(nonceBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Issues a scoped relay JWT (HS256) signed with the platform master key.
+    /// Claims: iss=cloudsmith-api, sub=&lt;relayId&gt;, relay_id, org_id, site_id (if set),
+    ///         scope, iat, exp (24h from now).
+    /// Falls back to a random 32-byte key if the master key is unavailable (dev/test).
+    /// </summary>
+    private static string IssueRelayJwt(
+        MasterSecretsKeyBootstrap bootstrap,
+        Guid relayId,
+        Guid orgId,
+        Guid? siteId,
+        string scope)
+    {
+        var keyBytes = bootstrap.LoadMasterKey() ?? RandomNumberGenerator.GetBytes(32);
+        var now      = DateTimeOffset.UtcNow;
+        var exp      = now.AddHours(24);
+
+        static string B64Url(byte[] bytes) =>
+            Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        var header  = B64Url(Encoding.UTF8.GetBytes("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"));
+
+        // Build payload JSON explicitly to avoid any serialiser dependency.
+        var siteIdJson = siteId.HasValue ? $",\"site_id\":\"{siteId.Value}\"" : string.Empty;
+        var payloadJson = string.Concat(
+            "{\"iss\":\"cloudsmith-api\"",
+            $",\"sub\":\"{relayId}\"",
+            $",\"relay_id\":\"{relayId}\"",
+            $",\"org_id\":\"{orgId}\"",
+            siteIdJson,
+            $",\"scope\":\"{scope}\"",
+            $",\"iat\":{now.ToUnixTimeSeconds()}",
+            $",\"exp\":{exp.ToUnixTimeSeconds()}",
+            "}");
+
+        var payload = B64Url(Encoding.UTF8.GetBytes(payloadJson));
+        var signingInput = $"{header}.{payload}";
+        using var hmac   = new HMACSHA256(keyBytes);
+        var sig = B64Url(hmac.ComputeHash(Encoding.UTF8.GetBytes(signingInput)));
+
+        return $"{signingInput}.{sig}";
     }
 
     private static RelayResponse ReadRelay(NpgsqlDataReader reader)
