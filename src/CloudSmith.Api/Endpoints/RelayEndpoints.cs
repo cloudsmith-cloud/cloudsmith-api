@@ -61,14 +61,17 @@ public static class RelayEndpoints
 
     public sealed record IssueEnrollmentTokenResponse(string Token, string ExpiresAt, Guid TokenId);
 
-    public sealed record EnrollRelayRequest(string Token, string DisplayName, string PublicKeyPem);
+    public sealed record EnrollRelayRequest(string Token, string DisplayName, string PublicKeyPem, Guid? SiteId);
 
     public sealed record EnrollRelayResponse(Guid RelayId, string Certificate);
+
+    public sealed record RelayHeartbeatRequest(Guid? SiteId);
 
     public sealed record RelayResponse(
         Guid RelayId,
         Guid OrgId,
         Guid? SiteId,
+        string? SiteName,
         string DisplayName,
         string Status,
         string EnrolledAt,
@@ -224,12 +227,13 @@ public static class RelayEndpoints
             {
                 await using var insert = new NpgsqlCommand("""
                     INSERT INTO core.relays
-                        (org_id, display_name, public_key_pem)
+                        (org_id, site_id, display_name, public_key_pem)
                     VALUES
-                        (@org_id, @display_name, @public_key_pem)
+                        (@org_id, @site_id, @display_name, @public_key_pem)
                     RETURNING relay_id
                     """, conn, tx);
                 insert.Parameters.AddWithValue("@org_id", orgId);
+                insert.Parameters.AddWithValue("@site_id", (object?)req.SiteId ?? DBNull.Value);
                 insert.Parameters.AddWithValue("@display_name", req.DisplayName);
                 insert.Parameters.AddWithValue("@public_key_pem", req.PublicKeyPem);
                 var result = await insert.ExecuteScalarAsync(ct);
@@ -275,10 +279,12 @@ public static class RelayEndpoints
                 return orgError!;
 
             const string sql = """
-                SELECT relay_id, org_id, site_id, display_name, status, enrolled_at, last_seen_at
-                FROM core.relays
-                WHERE org_id = @org_id
-                ORDER BY display_name
+                SELECT r.relay_id, r.org_id, r.site_id, s.name AS site_name,
+                       r.display_name, r.status, r.enrolled_at, r.last_seen_at
+                FROM core.relays r
+                LEFT JOIN core.sites s ON s.site_id = r.site_id
+                WHERE r.org_id = @org_id
+                ORDER BY r.display_name
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
@@ -307,9 +313,11 @@ public static class RelayEndpoints
                 return orgError!;
 
             const string sql = """
-                SELECT relay_id, org_id, site_id, display_name, status, enrolled_at, last_seen_at
-                FROM core.relays
-                WHERE org_id = @org_id AND relay_id = @relay_id
+                SELECT r.relay_id, r.org_id, r.site_id, s.name AS site_name,
+                       r.display_name, r.status, r.enrolled_at, r.last_seen_at
+                FROM core.relays r
+                LEFT JOIN core.sites s ON s.site_id = r.site_id
+                WHERE r.org_id = @org_id AND r.relay_id = @relay_id
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
@@ -358,6 +366,74 @@ public static class RelayEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
         .WithSummary("Revoke a relay (status='revoked'); preserves audit trail.");
+
+        // POST /api/v1/relays/{relayId}/heartbeat — REST heartbeat for relays that cannot
+        // maintain a persistent WebSocket (e.g. short-lived polling agents). Updates
+        // last_seen_at and optionally updates site_id if the caller supplies one.
+        relays.MapPost("/{relayId:guid}/heartbeat", async (
+            Guid relayId,
+            RelayHeartbeatRequest? req,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            // The relay authenticates via X-CloudSmith-RelayId header matching the path.
+            var headerRelayId = ctx.Request.Headers["X-CloudSmith-RelayId"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(headerRelayId)
+                || !Guid.TryParse(headerRelayId, out var headerGuid)
+                || headerGuid != relayId)
+            {
+                return Results.Json(
+                    new { error = "relay-identity-mismatch", message = "X-CloudSmith-RelayId header is missing or does not match the path relayId." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            // Verify relay exists and is not revoked.
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using (var checkCmd = new NpgsqlCommand(
+                "SELECT status FROM core.relays WHERE relay_id = @relay_id",
+                conn))
+            {
+                checkCmd.Parameters.AddWithValue("@relay_id", relayId);
+                var statusVal = await checkCmd.ExecuteScalarAsync(ct);
+                if (statusVal is null || statusVal is DBNull)
+                {
+                    return Results.NotFound(new { error = "relay-not-found", relayId });
+                }
+                if (string.Equals(statusVal.ToString(), "revoked", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Results.Json(
+                        new { error = "relay-revoked", relayId },
+                        statusCode: StatusCodes.Status403Forbidden);
+                }
+            }
+
+            // Update last_seen_at and optionally the site_id.
+            if (req?.SiteId.HasValue == true)
+            {
+                await using var updateCmd = new NpgsqlCommand("""
+                    UPDATE core.relays
+                    SET last_seen_at = now(),
+                        site_id      = @site_id
+                    WHERE relay_id = @relay_id
+                    """, conn);
+                updateCmd.Parameters.AddWithValue("@site_id", req.SiteId.Value);
+                updateCmd.Parameters.AddWithValue("@relay_id", relayId);
+                await updateCmd.ExecuteNonQueryAsync(ct);
+            }
+            else
+            {
+                await using var updateCmd = new NpgsqlCommand(
+                    "UPDATE core.relays SET last_seen_at = now() WHERE relay_id = @relay_id",
+                    conn);
+                updateCmd.Parameters.AddWithValue("@relay_id", relayId);
+                await updateCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            return Results.NoContent();
+        })
+        .AllowAnonymous()
+        .WithSummary("REST heartbeat — updates last_seen_at and optionally site_id. Authenticated via X-CloudSmith-RelayId header.");
 
         // GET /api/v1/relays/{relayId}/connect — persistent WebSocket hub (AB#1679).
         // The Relay calls this after enrollment to establish the persistent data-plane
@@ -642,10 +718,11 @@ public static class RelayEndpoints
             RelayId: reader.GetGuid(0),
             OrgId: reader.GetGuid(1),
             SiteId: reader.IsDBNull(2) ? (Guid?)null : reader.GetGuid(2),
-            DisplayName: reader.GetString(3),
-            Status: reader.GetString(4),
-            EnrolledAt: reader.GetDateTime(5).ToString("o"),
-            LastSeenAt: reader.IsDBNull(6) ? null : reader.GetDateTime(6).ToString("o"));
+            SiteName: reader.IsDBNull(3) ? null : reader.GetString(3),
+            DisplayName: reader.GetString(4),
+            Status: reader.GetString(5),
+            EnrolledAt: reader.GetDateTime(6).ToString("o"),
+            LastSeenAt: reader.IsDBNull(7) ? null : reader.GetDateTime(7).ToString("o"));
     }
 
     private static bool TryGetOrgId(HttpContext ctx, out Guid orgId, out IResult? error)

@@ -22,9 +22,10 @@ public static class SitesEndpoints
         string? Description,
         string? Location,
         string CreatedAt,
-        string UpdatedAt);
+        string UpdatedAt,
+        string ActivationStatus);
 
-    public sealed record CreateSiteRequest(string Name, string? Description, string? Location);
+    public sealed record CreateSiteRequest(string Name, string? Description, string? Location, Guid? RelayId);
 
     public sealed record UpdateSiteRequest(string? Name, string? Description, string? Location);
 
@@ -44,10 +45,16 @@ public static class SitesEndpoints
             }
 
             const string sql = """
-                SELECT site_id, name, description, location, created_at, updated_at
-                FROM core.sites
-                WHERE org_id = @org_id
-                ORDER BY name
+                SELECT s.site_id, s.name, s.description, s.location, s.created_at, s.updated_at,
+                       EXISTS (
+                           SELECT 1 FROM core.relays r
+                           WHERE r.site_id = s.site_id
+                             AND r.status  != 'revoked'
+                             AND r.last_seen_at >= now() - interval '2 minutes'
+                       ) AS is_active
+                FROM core.sites s
+                WHERE s.org_id = @org_id
+                ORDER BY s.name
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
@@ -64,7 +71,8 @@ public static class SitesEndpoints
                     Description: reader.IsDBNull(2) ? null : reader.GetString(2),
                     Location: reader.IsDBNull(3) ? null : reader.GetString(3),
                     CreatedAt: reader.GetDateTime(4).ToString("o"),
-                    UpdatedAt: reader.GetDateTime(5).ToString("o")));
+                    UpdatedAt: reader.GetDateTime(5).ToString("o"),
+                    ActivationStatus: reader.GetBoolean(6) ? "Active" : "Inactive"));
             }
 
             return Results.Ok(results);
@@ -83,9 +91,15 @@ public static class SitesEndpoints
                 return orgError!;
 
             const string sql = """
-                SELECT site_id, name, description, location, created_at, updated_at
-                FROM core.sites
-                WHERE org_id = @org_id AND site_id = @site_id
+                SELECT s.site_id, s.name, s.description, s.location, s.created_at, s.updated_at,
+                       EXISTS (
+                           SELECT 1 FROM core.relays r
+                           WHERE r.site_id = s.site_id
+                             AND r.status  != 'revoked'
+                             AND r.last_seen_at >= now() - interval '2 minutes'
+                       ) AS is_active
+                FROM core.sites s
+                WHERE s.org_id = @org_id AND s.site_id = @site_id
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
@@ -98,12 +112,13 @@ public static class SitesEndpoints
                 return Results.NotFound(new { error = "site-not-found", siteId });
 
             return Results.Ok(new SiteResponse(
-                SiteId:      reader.GetGuid(0),
-                Name:        reader.GetString(1),
-                Description: reader.IsDBNull(2) ? null : reader.GetString(2),
-                Location:    reader.IsDBNull(3) ? null : reader.GetString(3),
-                CreatedAt:   reader.GetDateTime(4).ToString("o"),
-                UpdatedAt:   reader.GetDateTime(5).ToString("o")));
+                SiteId:           reader.GetGuid(0),
+                Name:             reader.GetString(1),
+                Description:      reader.IsDBNull(2) ? null : reader.GetString(2),
+                Location:         reader.IsDBNull(3) ? null : reader.GetString(3),
+                CreatedAt:        reader.GetDateTime(4).ToString("o"),
+                UpdatedAt:        reader.GetDateTime(5).ToString("o"),
+                ActivationStatus: reader.GetBoolean(6) ? "Active" : "Inactive"));
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("Get a single site by ID.");
@@ -127,39 +142,62 @@ public static class SitesEndpoints
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
-            const string sql = """
+            const string insertSql = """
                 INSERT INTO core.sites (org_id, name, description, location)
                 VALUES (@org_id, @name, @description, @location)
                 RETURNING site_id, name, description, location, created_at, updated_at
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@org_id", orgId);
-            cmd.Parameters.AddWithValue("@name", request.Name);
-            cmd.Parameters.AddWithValue("@description", (object?)request.Description ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@location", (object?)request.Location ?? DBNull.Value);
+            await using var tx = await conn.BeginTransactionAsync(ct);
 
             try
             {
-                await using var reader = await cmd.ExecuteReaderAsync(ct);
-                if (!await reader.ReadAsync(ct))
+                // Step 1: insert the site and capture the response data.
+                SiteResponse response;
+                await using (var cmd = new NpgsqlCommand(insertSql, conn, tx))
                 {
-                    return Results.Json(new { error = "insert-failed" }, statusCode: StatusCodes.Status500InternalServerError);
+                    cmd.Parameters.AddWithValue("@org_id", orgId);
+                    cmd.Parameters.AddWithValue("@name", request.Name);
+                    cmd.Parameters.AddWithValue("@description", (object?)request.Description ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@location", (object?)request.Location ?? DBNull.Value);
+
+                    await using var reader = await cmd.ExecuteReaderAsync(ct);
+                    if (!await reader.ReadAsync(ct))
+                    {
+                        return Results.Json(new { error = "insert-failed" }, statusCode: StatusCodes.Status500InternalServerError);
+                    }
+
+                    response = new SiteResponse(
+                        SiteId: reader.GetGuid(0),
+                        Name: reader.GetString(1),
+                        Description: reader.IsDBNull(2) ? null : reader.GetString(2),
+                        Location: reader.IsDBNull(3) ? null : reader.GetString(3),
+                        CreatedAt: reader.GetDateTime(4).ToString("o"),
+                        UpdatedAt: reader.GetDateTime(5).ToString("o"),
+                        ActivationStatus: "Inactive");
+                } // reader + cmd disposed here — connection is free for next command
+
+                // Step 2: if a relayId was provided, associate the relay with the new site.
+                if (request.RelayId.HasValue)
+                {
+                    await using var assocCmd = new NpgsqlCommand("""
+                        UPDATE core.relays
+                        SET site_id = @site_id
+                        WHERE relay_id = @relay_id AND org_id = @org_id
+                        """, conn, tx);
+                    assocCmd.Parameters.AddWithValue("@site_id", response.SiteId);
+                    assocCmd.Parameters.AddWithValue("@relay_id", request.RelayId.Value);
+                    assocCmd.Parameters.AddWithValue("@org_id", orgId);
+                    await assocCmd.ExecuteNonQueryAsync(ct);
                 }
 
-                var response = new SiteResponse(
-                    SiteId: reader.GetGuid(0),
-                    Name: reader.GetString(1),
-                    Description: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    Location: reader.IsDBNull(3) ? null : reader.GetString(3),
-                    CreatedAt: reader.GetDateTime(4).ToString("o"),
-                    UpdatedAt: reader.GetDateTime(5).ToString("o"));
-
+                await tx.CommitAsync(ct);
                 return Results.Created($"/api/v1/platform/sites/{response.SiteId}", response);
             }
             catch (PostgresException pex) when (pex.SqlState == "23505")
             {
+                await tx.RollbackAsync(ct);
                 return Results.Json(
                     new { error = "site-name-conflict", name = request.Name },
                     statusCode: StatusCodes.Status409Conflict);
@@ -200,13 +238,23 @@ public static class SitesEndpoints
             }
 
             const string sql = """
-                UPDATE core.sites
-                SET name        = COALESCE(@name, name),
-                    description = COALESCE(@description, description),
-                    location    = COALESCE(@location, location),
-                    updated_at  = now()
-                WHERE org_id = @org_id AND site_id = @site_id
-                RETURNING site_id, name, description, location, created_at, updated_at
+                WITH updated AS (
+                    UPDATE core.sites
+                    SET name        = COALESCE(@name, name),
+                        description = COALESCE(@description, description),
+                        location    = COALESCE(@location, location),
+                        updated_at  = now()
+                    WHERE org_id = @org_id AND site_id = @site_id
+                    RETURNING site_id, name, description, location, created_at, updated_at
+                )
+                SELECT u.site_id, u.name, u.description, u.location, u.created_at, u.updated_at,
+                       EXISTS (
+                           SELECT 1 FROM core.relays r
+                           WHERE r.site_id = u.site_id
+                             AND r.status  != 'revoked'
+                             AND r.last_seen_at >= now() - interval '2 minutes'
+                       ) AS is_active
+                FROM updated u
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
@@ -226,12 +274,13 @@ public static class SitesEndpoints
                 }
 
                 var response = new SiteResponse(
-                    SiteId: reader.GetGuid(0),
-                    Name: reader.GetString(1),
-                    Description: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    Location: reader.IsDBNull(3) ? null : reader.GetString(3),
-                    CreatedAt: reader.GetDateTime(4).ToString("o"),
-                    UpdatedAt: reader.GetDateTime(5).ToString("o"));
+                    SiteId:           reader.GetGuid(0),
+                    Name:             reader.GetString(1),
+                    Description:      reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Location:         reader.IsDBNull(3) ? null : reader.GetString(3),
+                    CreatedAt:        reader.GetDateTime(4).ToString("o"),
+                    UpdatedAt:        reader.GetDateTime(5).ToString("o"),
+                    ActivationStatus: reader.GetBoolean(6) ? "Active" : "Inactive");
 
                 return Results.Ok(response);
             }
