@@ -81,6 +81,8 @@ public static class RelayEndpoints
 
     public sealed record RelayTokenResponse(string Token, string ExpiresAt);
 
+    public sealed record AssignRelayToSiteRequest(Guid? SiteId);
+
     public sealed record RegisterClusterRequest(string Name, Guid? SiteId, string ClusterType, Guid? RelayId);
 
     public sealed record RegisterClusterResponse(Guid ClusterId);
@@ -338,6 +340,39 @@ public static class RelayEndpoints
         })
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("Get a relay by id.");
+
+        // PATCH /api/v1/relays/{relayId}/assign-site — associate (or clear) the site for an enrolled relay.
+        relays.MapPatch("/{relayId:guid}/assign-site", async (
+            Guid relayId,
+            AssignRelayToSiteRequest req,
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            if (!TryGetOrgId(ctx, out var orgId, out var orgError))
+                return orgError!;
+
+            const string sql = """
+                UPDATE core.relays
+                SET site_id = @site_id
+                WHERE org_id = @org_id AND relay_id = @relay_id AND status != 'revoked'
+                RETURNING relay_id
+                """;
+
+            await using var conn = await db.OpenConnectionAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@org_id", orgId);
+            cmd.Parameters.AddWithValue("@relay_id", relayId);
+            cmd.Parameters.AddWithValue("@site_id", req.SiteId.HasValue ? (object)req.SiteId.Value : DBNull.Value);
+
+            var result = await cmd.ExecuteScalarAsync(ct);
+            if (result is null || result is DBNull)
+                return Results.NotFound(new { error = "relay-not-found", relayId });
+
+            return Results.NoContent();
+        })
+        .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:write")))
+        .WithSummary("Assign or unassign a site for an enrolled relay agent.");
 
         // DELETE /api/v1/relays/{relayId} — soft-delete (status='revoked'); preserves audit trail.
         relays.MapDelete("/{relayId:guid}", async (
