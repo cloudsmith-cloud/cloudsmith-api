@@ -267,13 +267,16 @@ builder.Services.AddHttpClient<IModuleCatalogService, GhcrModuleCatalogService>(
     client.DefaultRequestHeaders.Add("User-Agent", "cloudsmith-api/catalog");
 });
 
-// AB#1952 — Platform update check: anonymous HttpClient for GHCR manifest queries.
-builder.Services.AddHttpClient("ghcr-update", client =>
+// AB#1951 — Platform update check: HttpClient for GitHub Releases API queries.
+// User-Agent required by GitHub API policy; version string identifies the CloudSmith platform.
+builder.Services.AddHttpClient("github-releases", client =>
 {
     client.DefaultRequestHeaders.Add("User-Agent", "cloudsmith-api/update-check");
+    client.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
+    client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
 });
 
-// AB#1952 — IMemoryCache for caching GHCR digest lookups (15-minute TTL).
+// AB#1951 — IMemoryCache for caching GitHub Releases lookups (10-minute TTL).
 builder.Services.AddMemoryCache();
 
 // AB#2354 — Substrate adapter: collapses all _isPaaS branches into one DI decision.
@@ -388,7 +391,7 @@ app.MapJobBatchEndpoints();           // AB#1931 POST /api/v1/jobs/batch — bul
 app.MapNotificationsEndpoints();      // AB#1932 GET/PATCH /api/v1/notifications
 app.MapPlatformIdentityProviderEndpoints(); // AB#1933 POST/GET /api/v1/platform/identity/providers — AB#1934 consent-callback
 app.MapModuleCatalogEndpoints();            // AB#1925 GET /api/v1/modules/catalog, POST/DELETE /api/v1/modules/{id} — AB#1959 updateAvailable
-app.MapPlatformUpdateEndpoints();           // AB#1952 GET /api/v1/platform/updates/check — AB#1953 PUT /api/v1/platform/updates/apply
+app.MapPlatformUpdateEndpoints();           // AB#1951 GET /api/v1/platform/update/check — POST /api/v1/platform/update/apply
 
 // SignalR PlatformHub — real-time events for portal and runners (AB#1436).
 // Requires JWT Bearer or cookie auth (handled by ASP.NET Core middleware).
