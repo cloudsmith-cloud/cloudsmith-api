@@ -882,7 +882,13 @@ public static class RelayEndpoints
             using var rsa = RSA.Create();
             rsa.ImportFromPem(publicKeyPem);
             var nonceBytes = Encoding.UTF8.GetBytes(nonce);
-            var signature  = Convert.FromBase64String(signatureBase64);
+            // The relay sends base64url (RFC 4648 §5: '-' and '_', no padding).
+            // Convert.FromBase64String requires standard base64. Normalise before decoding.
+            var standardBase64 = signatureBase64
+                .Replace('-', '+')
+                .Replace('_', '/')
+                .PadRight(signatureBase64.Length + (4 - signatureBase64.Length % 4) % 4, '=');
+            var signature = Convert.FromBase64String(standardBase64);
             return rsa.VerifyData(nonceBytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         }
         catch
