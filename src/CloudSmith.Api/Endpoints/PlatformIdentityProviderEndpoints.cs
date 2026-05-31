@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Services;
+using CloudSmith.Core.Setup;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;

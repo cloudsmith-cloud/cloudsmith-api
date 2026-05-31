@@ -108,9 +108,10 @@ public static class PlatformUpdateEndpoints
         // Returns HTTP 202 Accepted with a job ID immediately; actual execution is async.
         group.MapPost("/apply", async (
             ISubstrateAdapter substrate,
-            ILogger<PlatformUpdateEndpoints> logger,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
+            var logger = loggerFactory.CreateLogger("PlatformUpdate");
             var jobId = $"upd-{Guid.NewGuid()}";
             try
             {
