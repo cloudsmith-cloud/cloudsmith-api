@@ -917,6 +917,68 @@ public static class PlatformEndpoints
         .RequireAuthorization(p => p.AddRequirements(new PermissionRequirement("platform:read")))
         .WithSummary("Per-component control-plane health board (API server, PostgreSQL, relay agents, identity providers).");
 
+        // GET /api/v1/platform/version — component version manifest. AB#2514.
+        // Returns API version (from CLOUDSMITH_VERSION env var), portal version (from
+        // CLOUDSMITH_PORTAL_VERSION env var), solution version (from CLOUDSMITH_SOLUTION_VERSION
+        // env var), and connected relay list with displayName and lastSeenAt.
+        // Accessible to any authenticated user (no elevated scope required).
+        group.MapGet("/version", async (
+            NpgsqlDataSource db,
+            HttpContext ctx,
+            CancellationToken ct) =>
+        {
+            var orgIdClaim = ctx.User.FindFirstValue("org_id");
+            if (string.IsNullOrEmpty(orgIdClaim) || !Guid.TryParse(orgIdClaim, out var orgId))
+                return Results.Json(new { error = "missing-org-context" }, statusCode: StatusCodes.Status400BadRequest);
+
+            var apiVersion      = Environment.GetEnvironmentVariable("CLOUDSMITH_VERSION") ?? "unknown";
+            var portalVersion   = Environment.GetEnvironmentVariable("CLOUDSMITH_PORTAL_VERSION") ?? "unknown";
+            var solutionVersion = Environment.GetEnvironmentVariable("CLOUDSMITH_SOLUTION_VERSION") ?? "unknown";
+            var apiCommitSha    = Environment.GetEnvironmentVariable("CLOUDSMITH_COMMIT_SHA") ?? "unknown";
+
+            // Query connected relays for this org — return relayId, displayName, and lastSeenAt.
+            // The 'version' field is not stored yet; return "unknown" per graceful-degradation rule.
+            var relays = new List<object>();
+            try
+            {
+                const string relaySql = """
+                    SELECT relay_id, display_name, last_seen_at
+                    FROM core.relays
+                    WHERE org_id = @org_id AND status = 'active'
+                    ORDER BY display_name
+                    """;
+                await using var conn = await db.OpenConnectionAsync(ct);
+                await using var cmd  = new NpgsqlCommand(relaySql, conn);
+                cmd.Parameters.AddWithValue("@org_id", orgId);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    relays.Add(new
+                    {
+                        relayId     = reader.GetGuid(0).ToString(),
+                        displayName = reader.GetString(1),
+                        version     = "unknown",
+                        lastSeenAt  = reader.IsDBNull(2) ? (string?)null : reader.GetDateTime(2).ToString("o"),
+                    });
+                }
+            }
+            catch
+            {
+                // DB error — return empty relay list rather than failing the whole request.
+            }
+
+            return Results.Ok(new
+            {
+                apiVersion,
+                apiCommitSha,
+                portalVersion,
+                solutionVersion,
+                connectedRelays = relays,
+            });
+        })
+        .RequireAuthorization()
+        .WithSummary("Component version manifest — API, portal, solution, and connected relays. Accessible to any authenticated user (AB#2514).");
+
         return app;
     }
 
