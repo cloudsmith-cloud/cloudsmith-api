@@ -63,3 +63,12 @@ This repo's `.claude/` is bootstrapped from `cloudsmith-internal/.claude/templat
 
 If a command, skill, or agent is missing here, it lives in `cloudsmith-internal/.claude/`. Run `/repo-init` to re-bootstrap.
 
+---
+
+## Subagents available in this repo
+
+- `cloudsmith-api-engineer` (model: sonnet) — cloudsmith-api application engineer — TypeScript, Node.js, API development, tests
+
+User-level agents (every repo): ``triage-lookup``, ``markdown-prose-editor``, ``azurelocal-domain-expert``, ``mkdocs-material-doctor``, ``turner-module-scaffold-engineer``, ``mms-2026-demo-presenter``.
+
+Platform repo agents (when working in `D:\git\platform`): `orchestration-pm`, `security-waf-caf`, `terraform-validator`, `bicep-validator`, `arm-validator`, `ansible-linter`, `powershell-linter`, `reviewer`, `security-reviewer`, `documenter`, `coder`, `planner`, `operator`, `investigator`, `test-writer`, `router`.
