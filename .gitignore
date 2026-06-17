@@ -1,0 +1,3 @@
+# Claude Code local settings (logs and machine-local overrides only — agents/hooks/settings are committed)
+.claude/logs/
+.claude/settings.local.json
