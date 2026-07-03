@@ -75,3 +75,15 @@ public sealed class FakeJobDirectory : IJobDirectory
     public Task<Guid?> GetOrgIdAsync(Guid jobId, CancellationToken ct = default)
         => Task.FromResult(OrgByJob.TryGetValue(jobId, out var orgId) ? (Guid?)orgId : null);
 }
+
+/// <summary>Hand-rolled IJobAuditWriter fake — records job.completed audit writes.</summary>
+public sealed class FakeJobAuditWriter : IJobAuditWriter
+{
+    public List<(Guid OrgId, Guid JobId, Guid RelayId, JobResult Result)> Writes { get; } = [];
+
+    public Task WriteJobCompletedAsync(Guid orgId, Guid jobId, Guid relayId, JobResult result, CancellationToken ct = default)
+    {
+        Writes.Add((orgId, jobId, relayId, result));
+        return Task.CompletedTask;
+    }
+}

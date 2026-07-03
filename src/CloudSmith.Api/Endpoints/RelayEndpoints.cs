@@ -1124,6 +1124,19 @@ public static class RelayEndpoints
                 }
                 break;
 
+            case "job.result":
+                // AB#4841 — persist the agent result forwarded by the relay: idempotent
+                // on jobId, terminal-state transition + core.audit_log row.
+                if (JsonSerializer.Deserialize<JobFrame>(frame.Span, WsJsonOpts) is JobResult jobResult)
+                {
+                    await jobFrames.HandleResultAsync(jobResult, relayId, ct);
+                }
+                else
+                {
+                    logger.LogWarning("Relay {RelayId}: malformed job.result frame — discarding", relayId);
+                }
+                break;
+
             default:
                 logger.LogDebug("Relay {RelayId}: unknown message type '{Type}' — ignoring", relayId, msgType);
                 break;

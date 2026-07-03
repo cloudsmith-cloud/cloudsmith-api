@@ -8,21 +8,25 @@ namespace CloudSmith.Api.Services.Jobs;
 /// <summary>
 /// Handles inbound job frames on the PaaS↔Relay WebSocket (contract §1, AB#4839).
 /// job.ack (AB#4844): persists dispatch confirmation — replaces the log-only MVP path.
+/// job.result (AB#4841): idempotent terminal-state persistence + audit trail.
 /// Scoped — resolved per relay connection request.
 /// </summary>
 public sealed class RelayJobFrameHandler
 {
     private readonly IJobService _jobs;
     private readonly IJobDirectory _directory;
+    private readonly IJobAuditWriter _audit;
     private readonly ILogger<RelayJobFrameHandler> _logger;
 
     public RelayJobFrameHandler(
         IJobService jobs,
         IJobDirectory directory,
+        IJobAuditWriter audit,
         ILogger<RelayJobFrameHandler> logger)
     {
         _jobs      = jobs;
         _directory = directory;
+        _audit     = audit;
         _logger    = logger;
     }
 
@@ -77,6 +81,44 @@ public sealed class RelayJobFrameHandler
                     relayId, ack.JobId, ack.AckStatus);
                 break;
         }
+    }
+
+    /// <summary>
+    /// job.result semantics (contract §1.3 + §4.3, AB#4841): the result is applied
+    /// only while the job is non-terminal — <see cref="IJobService.RecordResultAsync"/>
+    /// transitions to succeeded/failed, stamps completed_at from the agent's
+    /// CompletedAt, and backfills started_at when the running signal was lost.
+    /// First result wins; duplicates and replays are no-ops (logged, discarded),
+    /// making at-least-once forwarding on both hops safe. On first application a
+    /// core.audit_log row is written (actor=system/relay, action=job.completed).
+    /// </summary>
+    public async Task HandleResultAsync(JobResult result, Guid relayId, CancellationToken ct)
+    {
+        var applied = await _jobs.RecordResultAsync(result.JobId, result, ct);
+        if (!applied)
+        {
+            // Duplicate result or job already terminal (e.g. timed_out adjudicated
+            // by the watchdog before a late result arrived) — discard per contract.
+            _logger.LogInformation(
+                "Relay {RelayId}: job.result for {JobId} discarded — job is terminal or result already applied",
+                relayId, result.JobId);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Relay {RelayId}: job.result applied for {JobId} — {Outcome} (exit {ExitCode})",
+            relayId, result.JobId, result.Succeeded ? JobStatuses.Succeeded : JobStatuses.Failed, result.ExitCode);
+
+        var orgId = await _directory.GetOrgIdAsync(result.JobId, ct);
+        if (orgId is null)
+        {
+            _logger.LogWarning(
+                "Relay {RelayId}: job {JobId} has no org row for audit — skipping audit write",
+                relayId, result.JobId);
+            return;
+        }
+
+        await _audit.WriteJobCompletedAsync(orgId.Value, result.JobId, relayId, result, ct);
     }
 
     private async Task HandleRejectedAsync(JobAck ack, Guid relayId, CancellationToken ct)
