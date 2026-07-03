@@ -708,6 +708,44 @@ public static class RelayEndpoints
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            // Fresh-db guard (AB#4845 / W1-D1): some environments create
+            // cluster_mgmt.clusters without the Wave 1 extension columns.
+            // Self-heal here so first-run registration does not fail with 42703.
+            const string ensureClusterColumnsSql = """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = 'cluster_mgmt' AND table_name = 'clusters'
+                    ) THEN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = 'cluster_mgmt' AND table_name = 'clusters' AND column_name = 'cluster_type'
+                        ) THEN
+                            ALTER TABLE cluster_mgmt.clusters
+                                ADD COLUMN cluster_type text
+                                CHECK (cluster_type IN ('HyperV','AzureLocal','WSFC'));
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = 'cluster_mgmt' AND table_name = 'clusters' AND column_name = 'relay_id'
+                        ) THEN
+                            ALTER TABLE cluster_mgmt.clusters
+                                ADD COLUMN relay_id uuid
+                                REFERENCES core.relays (relay_id) ON DELETE SET NULL;
+                        END IF;
+
+                        CREATE INDEX IF NOT EXISTS idx_clusters_relay_id
+                            ON cluster_mgmt.clusters (relay_id)
+                            WHERE relay_id IS NOT NULL;
+
+                        ALTER TABLE cluster_mgmt.clusters
+                            ALTER COLUMN site_id DROP NOT NULL;
+                    END IF;
+                END $$;
+                """;
+
             const string sql = """
                 INSERT INTO cluster_mgmt.clusters
                     (org_id, site_id, name, cluster_type, relay_id, status)
@@ -717,6 +755,10 @@ public static class RelayEndpoints
                 """;
 
             await using var conn = await db.OpenConnectionAsync(ct);
+            await using (var ensure = new NpgsqlCommand(ensureClusterColumnsSql, conn))
+            {
+                await ensure.ExecuteNonQueryAsync(ct);
+            }
             await using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@org_id", orgId);
             cmd.Parameters.AddWithValue("@site_id", (object?)req.SiteId ?? DBNull.Value);
