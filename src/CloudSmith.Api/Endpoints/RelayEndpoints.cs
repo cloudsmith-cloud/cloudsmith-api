@@ -10,6 +10,7 @@ using System.Text.Json;
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Relay;
 using CloudSmith.Api.Services;
+using CloudSmith.Core.Jobs;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -63,7 +64,7 @@ public static class RelayEndpoints
 
     public sealed record IssueEnrollmentTokenResponse(string Token, string ExpiresAt, Guid TokenId);
 
-    public sealed record EnrollRelayRequest(string Token, string DisplayName, string PublicKeyPem, Guid? SiteId);
+    public sealed record EnrollRelayRequest(string Token, string DisplayName, string PublicKeyPem, Guid? SiteId, string? Env = null);
 
     public sealed record EnrollRelayResponse(Guid RelayId, string Certificate);
 
@@ -77,7 +78,8 @@ public static class RelayEndpoints
         string DisplayName,
         string Status,
         string EnrolledAt,
-        string? LastSeenAt);
+        string? LastSeenAt,
+        string Env);
 
     public sealed record RelayTokenResponse(string Token, string ExpiresAt);
 
@@ -233,15 +235,18 @@ public static class RelayEndpoints
             {
                 await using var insert = new NpgsqlCommand("""
                     INSERT INTO core.relays
-                        (org_id, site_id, display_name, public_key_pem)
+                        (org_id, site_id, display_name, public_key_pem, env)
                     VALUES
-                        (@org_id, @site_id, @display_name, @public_key_pem)
+                        (@org_id, @site_id, @display_name, @public_key_pem, @env)
                     RETURNING relay_id
                     """, conn, tx);
                 insert.Parameters.AddWithValue("@org_id", orgId);
                 insert.Parameters.AddWithValue("@site_id", (object?)req.SiteId ?? DBNull.Value);
                 insert.Parameters.AddWithValue("@display_name", req.DisplayName);
                 insert.Parameters.AddWithValue("@public_key_pem", req.PublicKeyPem);
+                // AB#2762 — contract §5: the Relay presents its env at enrollment;
+                // null/empty coerces to 'default' (env is NOT NULL DEFAULT 'default').
+                insert.Parameters.AddWithValue("@env", JobEnvironments.Normalize(req.Env));
                 var result = await insert.ExecuteScalarAsync(ct);
                 relayId = (Guid)result!;
             }
@@ -286,7 +291,7 @@ public static class RelayEndpoints
 
             const string sql = """
                 SELECT r.relay_id, r.org_id, r.site_id, s.name AS site_name,
-                       r.display_name, r.status, r.enrolled_at, r.last_seen_at
+                       r.display_name, r.status, r.enrolled_at, r.last_seen_at, r.env
                 FROM core.relays r
                 LEFT JOIN core.sites s ON s.site_id = r.site_id
                 WHERE r.org_id = @org_id
@@ -320,7 +325,7 @@ public static class RelayEndpoints
 
             const string sql = """
                 SELECT r.relay_id, r.org_id, r.site_id, s.name AS site_name,
-                       r.display_name, r.status, r.enrolled_at, r.last_seen_at
+                       r.display_name, r.status, r.enrolled_at, r.last_seen_at, r.env
                 FROM core.relays r
                 LEFT JOIN core.sites s ON s.site_id = r.site_id
                 WHERE r.org_id = @org_id AND r.relay_id = @relay_id
@@ -950,7 +955,8 @@ public static class RelayEndpoints
             DisplayName: reader.GetString(4),
             Status: reader.GetString(5),
             EnrolledAt: reader.GetDateTime(6).ToString("o"),
-            LastSeenAt: reader.IsDBNull(7) ? null : reader.GetDateTime(7).ToString("o"));
+            LastSeenAt: reader.IsDBNull(7) ? null : reader.GetDateTime(7).ToString("o"),
+            Env: reader.GetString(8));
     }
 
     private static bool TryGetOrgId(HttpContext ctx, out Guid orgId, out IResult? error)
