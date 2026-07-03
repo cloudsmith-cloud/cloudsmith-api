@@ -248,6 +248,10 @@ builder.Services.AddRateLimiter(opts =>
 // Relay WebSocket hub — in-memory registry of connected relay sockets (AB#1679)
 builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>();
 
+// AB#2961 / AB#2765 — outbound job.dispatch over the relay WebSocket with strict
+// (site_id, env) routing per the frozen contract (AB#4839).
+builder.Services.AddSingleton<IRelayDispatchService, RelayDispatchService>();
+
 // AB#1931 — In-process job batch processor (Phase IV; replaced by durable worker in Phase V).
 builder.Services.AddSingleton<CloudSmith.Api.Services.IJobBatchProcessor, CloudSmith.Api.Services.InProcessJobBatchProcessor>();
 
