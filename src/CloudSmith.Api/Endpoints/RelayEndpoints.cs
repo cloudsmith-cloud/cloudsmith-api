@@ -10,6 +10,7 @@ using System.Text.Json;
 using CloudSmith.Api.Authorization;
 using CloudSmith.Api.Relay;
 using CloudSmith.Api.Services;
+using CloudSmith.Api.Services.Jobs;
 using CloudSmith.Core.Jobs;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -500,6 +501,7 @@ public static class RelayEndpoints
             IConnectedRelayRegistry registry,
             ILoggerFactory loggerFactory,
             MasterSecretsKeyBootstrap bootstrap,
+            RelayJobFrameHandler jobFrames,
             CancellationToken ct) =>
         {
             if (!ctx.WebSockets.IsWebSocketRequest)
@@ -585,7 +587,7 @@ public static class RelayEndpoints
 
             try
             {
-                await HandleRelayWebSocketAsync(ws, relayId, orgId, db, registry, logger, ct);
+                await HandleRelayWebSocketAsync(ws, relayId, orgId, db, registry, jobFrames, logger, ct);
             }
             finally
             {
@@ -1024,6 +1026,7 @@ public static class RelayEndpoints
         Guid orgId,
         NpgsqlDataSource db,
         IConnectedRelayRegistry registry,
+        RelayJobFrameHandler jobFrames,
         ILogger logger,
         CancellationToken ct)
     {
@@ -1056,7 +1059,7 @@ public static class RelayEndpoints
                 {
                     await DispatchRelayFrameAsync(
                         assembler.ToArray().AsMemory(),
-                        relayId, orgId, db, logger, ct);
+                        relayId, orgId, db, jobFrames, logger, ct);
                 }
                 catch (Exception ex)
                 {
@@ -1076,6 +1079,7 @@ public static class RelayEndpoints
         Guid relayId,
         Guid orgId,
         NpgsqlDataSource db,
+        RelayJobFrameHandler jobFrames,
         ILogger logger,
         CancellationToken ct)
     {
@@ -1107,7 +1111,17 @@ public static class RelayEndpoints
                 break;
 
             case "job.ack":
-                logger.LogInformation("Relay {RelayId}: job.ack received (MVP — no persistent action)", relayId);
+                // AB#4844 — persist dispatch confirmation (replaces the log-only MVP path).
+                // Frames deserialize as the JobFrame base type so the $type discriminator
+                // resolves the derived record (contract §1, AB#4839).
+                if (JsonSerializer.Deserialize<JobFrame>(frame.Span, WsJsonOpts) is JobAck ack)
+                {
+                    await jobFrames.HandleAckAsync(ack, relayId, ct);
+                }
+                else
+                {
+                    logger.LogWarning("Relay {RelayId}: malformed job.ack frame — discarding", relayId);
+                }
                 break;
 
             default:

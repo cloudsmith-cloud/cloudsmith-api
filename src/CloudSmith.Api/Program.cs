@@ -252,6 +252,14 @@ builder.Services.AddSingleton<IConnectedRelayRegistry, ConnectedRelayRegistry>()
 // (site_id, env) routing per the frozen contract (AB#4839).
 builder.Services.AddSingleton<IRelayDispatchService, RelayDispatchService>();
 
+// AB#4844 — durable Job Engine dispatcher: startup rescan, FOR UPDATE SKIP LOCKED
+// claim loop, timeout sweeper, and the relay job.ack persistence handler.
+builder.Services.AddSingleton(builder.Configuration.GetSection("JobDispatcher").Get<CloudSmith.Api.Services.Jobs.JobDispatcherOptions>()
+    ?? new CloudSmith.Api.Services.Jobs.JobDispatcherOptions());
+builder.Services.AddSingleton<CloudSmith.Api.Services.Jobs.IJobDirectory, CloudSmith.Api.Services.Jobs.PostgresJobDirectory>();
+builder.Services.AddScoped<CloudSmith.Api.Services.Jobs.RelayJobFrameHandler>();
+builder.Services.AddHostedService<CloudSmith.Api.Services.Jobs.JobDispatcherService>();
+
 // AB#1931 — In-process job batch processor (Phase IV; replaced by durable worker in Phase V).
 builder.Services.AddSingleton<CloudSmith.Api.Services.IJobBatchProcessor, CloudSmith.Api.Services.InProcessJobBatchProcessor>();
 
