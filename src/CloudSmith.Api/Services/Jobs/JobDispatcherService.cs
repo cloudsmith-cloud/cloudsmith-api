@@ -40,6 +40,7 @@ public sealed class JobDispatcherService : BackgroundService
 {
     private readonly NpgsqlDataSource _db;
     private readonly IRelayDispatchService _dispatch;
+    private readonly IBatchRollupService _batchRollup;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly JobDispatcherOptions _options;
     private readonly ILogger<JobDispatcherService> _logger;
@@ -47,12 +48,14 @@ public sealed class JobDispatcherService : BackgroundService
     public JobDispatcherService(
         NpgsqlDataSource db,
         IRelayDispatchService dispatch,
+        IBatchRollupService batchRollup,
         IServiceScopeFactory scopeFactory,
         JobDispatcherOptions options,
         ILogger<JobDispatcherService> logger)
     {
         _db           = db;
         _dispatch     = dispatch;
+        _batchRollup  = batchRollup;
         _scopeFactory = scopeFactory;
         _options      = options;
         _logger       = logger;
@@ -225,7 +228,7 @@ public sealed class JobDispatcherService : BackgroundService
         foreach (var job in expired)
         {
             ct.ThrowIfCancellationRequested();
-            await JobDispatchLogic.SweepOneAsync(job, jobs, _logger, ct);
+            await JobDispatchLogic.SweepOneAsync(job, jobs, _batchRollup, _logger, ct);
         }
     }
 }

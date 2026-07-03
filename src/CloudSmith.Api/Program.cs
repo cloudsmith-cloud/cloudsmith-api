@@ -258,11 +258,11 @@ builder.Services.AddSingleton(builder.Configuration.GetSection("JobDispatcher").
     ?? new CloudSmith.Api.Services.Jobs.JobDispatcherOptions());
 builder.Services.AddSingleton<CloudSmith.Api.Services.Jobs.IJobDirectory, CloudSmith.Api.Services.Jobs.PostgresJobDirectory>();
 builder.Services.AddSingleton<CloudSmith.Api.Services.Jobs.IJobAuditWriter, CloudSmith.Api.Services.Jobs.PostgresJobAuditWriter>();
+// AB#4843 — batch = aggregation over core.jobs: child-job terminal transitions
+// drive item projection sync, batch counters, and completion notifications.
+builder.Services.AddSingleton<CloudSmith.Api.Services.Jobs.IBatchRollupService, CloudSmith.Api.Services.Jobs.PostgresBatchRollupService>();
 builder.Services.AddScoped<CloudSmith.Api.Services.Jobs.RelayJobFrameHandler>();
 builder.Services.AddHostedService<CloudSmith.Api.Services.Jobs.JobDispatcherService>();
-
-// AB#1931 — In-process job batch processor (Phase IV; replaced by durable worker in Phase V).
-builder.Services.AddSingleton<CloudSmith.Api.Services.IJobBatchProcessor, CloudSmith.Api.Services.InProcessJobBatchProcessor>();
 
 // AB#1932 — Notification service for job completion/failure events.
 builder.Services.AddScoped<CloudSmith.Api.Services.INotificationService, CloudSmith.Api.Services.PostgresNotificationService>();
@@ -400,7 +400,7 @@ app.MapHardwareCatalogEndpoints();    // AB#1496 hardware catalog profiles + dri
 app.MapPermissionsEndpoints();        // AB#1422 /auth/v1/me/permissions — caller's effective permission set
 app.MapPlatformAuditEndpoints();      // AB#1929 POST /api/v1/platform/audit — portal-originated audit event ingest
 app.MapDashboardLayoutEndpoints();    // AB#1930 GET/PATCH /api/v1/users/me/dashboard-layout
-app.MapJobBatchEndpoints();           // AB#1931 POST /api/v1/jobs/batch — bulk job batching
+app.MapJobBatchEndpoints();           // AB#4843 /api/v1/jobs/batch — batch = aggregation over core.jobs
 app.MapNotificationsEndpoints();      // AB#1932 GET/PATCH /api/v1/notifications
 app.MapPlatformIdentityProviderEndpoints(); // AB#1933 POST/GET /api/v1/platform/identity/providers — AB#1934 consent-callback
 app.MapModuleCatalogEndpoints();            // AB#1925 GET /api/v1/modules/catalog, POST/DELETE /api/v1/modules/{id} — AB#1959 updateAvailable

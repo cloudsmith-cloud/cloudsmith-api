@@ -25,14 +25,15 @@ public sealed class JobResultHandlerTests
         Error:       succeeded ? null : "boom",
         CompletedAt: DateTimeOffset.UtcNow);
 
-    private static (RelayJobFrameHandler Handler, FakeJobService Jobs, FakeJobDirectory Directory, FakeJobAuditWriter Audit)
+    private static (RelayJobFrameHandler Handler, FakeJobService Jobs, FakeJobDirectory Directory, FakeJobAuditWriter Audit, FakeBatchRollupService Rollup)
         Build()
     {
         var jobs      = new FakeJobService();
         var directory = new FakeJobDirectory();
         var audit     = new FakeJobAuditWriter();
-        var handler   = new RelayJobFrameHandler(jobs, directory, audit, NullLogger<RelayJobFrameHandler>.Instance);
-        return (handler, jobs, directory, audit);
+        var rollup    = new FakeBatchRollupService();
+        var handler   = new RelayJobFrameHandler(jobs, directory, audit, rollup, NullLogger<RelayJobFrameHandler>.Instance);
+        return (handler, jobs, directory, audit, rollup);
     }
 
     [Fact]
@@ -40,7 +41,7 @@ public sealed class JobResultHandlerTests
     {
         var jobId = Guid.NewGuid();
         var orgId = Guid.NewGuid();
-        var (handler, jobs, directory, audit) = Build();
+        var (handler, jobs, directory, audit, rollup) = Build();
         directory.OrgByJob[jobId] = orgId;
 
         var result = Result(jobId);
@@ -54,13 +55,15 @@ public sealed class JobResultHandlerTests
         audit.Writes[0].OrgId.Should().Be(orgId);
         audit.Writes[0].JobId.Should().Be(jobId);
         audit.Writes[0].RelayId.Should().Be(RelayId);
+
+        rollup.RolledUpJobIds.Should().ContainSingle().Which.Should().Be(jobId);
     }
 
     [Fact]
     public async Task Duplicate_result_is_a_noop_with_no_audit()
     {
         var jobId = Guid.NewGuid();
-        var (handler, jobs, directory, audit) = Build();
+        var (handler, jobs, directory, audit, rollup) = Build();
         directory.OrgByJob[jobId] = Guid.NewGuid();
         jobs.RecordResultResult = (_, _) => false; // job already terminal / result already applied
 
@@ -68,13 +71,14 @@ public sealed class JobResultHandlerTests
 
         jobs.RecordedResults.Should().ContainSingle("the idempotent record attempt still happens");
         audit.Writes.Should().BeEmpty("duplicates must not produce a second audit row");
+        rollup.RolledUpJobIds.Should().BeEmpty("a discarded duplicate must not re-trigger batch rollup");
     }
 
     [Fact]
     public async Task Failed_result_is_recorded_and_audited()
     {
         var jobId = Guid.NewGuid();
-        var (handler, jobs, directory, audit) = Build();
+        var (handler, jobs, directory, audit, _) = Build();
         directory.OrgByJob[jobId] = Guid.NewGuid();
 
         await handler.HandleResultAsync(Result(jobId, succeeded: false), RelayId, CancellationToken.None);
@@ -87,7 +91,7 @@ public sealed class JobResultHandlerTests
     [Fact]
     public async Task Missing_org_row_skips_audit_without_throwing()
     {
-        var (handler, jobs, _, audit) = Build();
+        var (handler, jobs, _, audit, _) = Build();
 
         var act = async () => await handler.HandleResultAsync(Result(Guid.NewGuid()), RelayId, CancellationToken.None);
 

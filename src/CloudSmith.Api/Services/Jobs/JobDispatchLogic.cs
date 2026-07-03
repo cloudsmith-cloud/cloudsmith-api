@@ -76,6 +76,7 @@ public static class JobDispatchLogic
     public static async Task SweepOneAsync(
         ExpiredJob job,
         IJobService jobs,
+        IBatchRollupService batchRollup,
         ILogger logger,
         CancellationToken ct)
     {
@@ -88,6 +89,7 @@ public static class JobDispatchLogic
                         errorCode: "no-route",
                         errorMessage: "No matching (site_id, env) relay connected before timeout_at.",
                         ct: ct);
+                    await batchRollup.OnJobTerminalAsync(job.JobId, ct);
                     logger.LogWarning("Job {JobId}: timed out while queued — failed with no-route", job.JobId);
                 }
                 break;
@@ -96,6 +98,7 @@ public static class JobDispatchLogic
             case JobStatuses.Running:
                 if (await jobs.TryTransitionAsync(job.JobId, job.Status, JobStatuses.TimedOut, ct))
                 {
+                    await batchRollup.OnJobTerminalAsync(job.JobId, ct);
                     logger.LogWarning("Job {JobId}: {Status} past timeout_at — timed_out", job.JobId, job.Status);
                 }
                 break;

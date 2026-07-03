@@ -87,3 +87,15 @@ public sealed class FakeJobAuditWriter : IJobAuditWriter
         return Task.CompletedTask;
     }
 }
+
+/// <summary>Hand-rolled IBatchRollupService fake — records terminal rollup calls.</summary>
+public sealed class FakeBatchRollupService : IBatchRollupService
+{
+    public List<Guid> RolledUpJobIds { get; } = [];
+
+    public Task OnJobTerminalAsync(Guid jobId, CancellationToken ct = default)
+    {
+        RolledUpJobIds.Add(jobId);
+        return Task.CompletedTask;
+    }
+}

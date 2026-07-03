@@ -19,7 +19,8 @@ public sealed class JobAckHandlerTests
     private static readonly Guid RelayId = Guid.NewGuid();
 
     private static RelayJobFrameHandler Handler(FakeJobService jobs, FakeJobDirectory? directory = null) =>
-        new(jobs, directory ?? new FakeJobDirectory(), new FakeJobAuditWriter(), NullLogger<RelayJobFrameHandler>.Instance);
+        new(jobs, directory ?? new FakeJobDirectory(), new FakeJobAuditWriter(), new FakeBatchRollupService(),
+            NullLogger<RelayJobFrameHandler>.Instance);
 
     [Fact]
     public async Task Accepted_ack_attempts_defensive_queued_to_dispatched()

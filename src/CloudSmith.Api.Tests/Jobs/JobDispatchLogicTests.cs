@@ -97,16 +97,18 @@ public sealed class TimeoutSweeperTests
     [Fact]
     public async Task Queued_past_deadline_fails_with_no_route()
     {
-        var job  = new ExpiredJob(Guid.NewGuid(), Guid.NewGuid(), JobStatuses.Queued);
-        var jobs = new FakeJobService();
+        var job    = new ExpiredJob(Guid.NewGuid(), Guid.NewGuid(), JobStatuses.Queued);
+        var jobs   = new FakeJobService();
+        var rollup = new FakeBatchRollupService();
 
-        await JobDispatchLogic.SweepOneAsync(job, jobs, NullLogger.Instance, CancellationToken.None);
+        await JobDispatchLogic.SweepOneAsync(job, jobs, rollup, NullLogger.Instance, CancellationToken.None);
 
         jobs.Transitions.Should().ContainSingle()
             .Which.Should().Be((job.JobId, JobStatuses.Queued, JobStatuses.Failed));
         jobs.StatusUpdates.Should().ContainSingle();
         jobs.StatusUpdates[0].ErrorCode.Should().Be("no-route");
         jobs.StatusUpdates[0].OrgId.Should().Be(job.OrgId);
+        rollup.RolledUpJobIds.Should().ContainSingle().Which.Should().Be(job.JobId);
     }
 
     [Theory]
@@ -114,24 +116,28 @@ public sealed class TimeoutSweeperTests
     [InlineData("running")]
     public async Task Dispatched_and_running_past_deadline_time_out(string status)
     {
-        var job  = new ExpiredJob(Guid.NewGuid(), Guid.NewGuid(), status);
-        var jobs = new FakeJobService();
+        var job    = new ExpiredJob(Guid.NewGuid(), Guid.NewGuid(), status);
+        var jobs   = new FakeJobService();
+        var rollup = new FakeBatchRollupService();
 
-        await JobDispatchLogic.SweepOneAsync(job, jobs, NullLogger.Instance, CancellationToken.None);
+        await JobDispatchLogic.SweepOneAsync(job, jobs, rollup, NullLogger.Instance, CancellationToken.None);
 
         jobs.Transitions.Should().ContainSingle()
             .Which.Should().Be((job.JobId, status, JobStatuses.TimedOut));
         jobs.StatusUpdates.Should().BeEmpty();
+        rollup.RolledUpJobIds.Should().ContainSingle("timed_out is terminal and must roll up into any containing batch");
     }
 
     [Fact]
     public async Task Lost_sweep_race_writes_no_error_fields()
     {
-        var job  = new ExpiredJob(Guid.NewGuid(), Guid.NewGuid(), JobStatuses.Queued);
-        var jobs = new FakeJobService { TransitionResult = (_, _, _) => false };
+        var job    = new ExpiredJob(Guid.NewGuid(), Guid.NewGuid(), JobStatuses.Queued);
+        var jobs   = new FakeJobService { TransitionResult = (_, _, _) => false };
+        var rollup = new FakeBatchRollupService();
 
-        await JobDispatchLogic.SweepOneAsync(job, jobs, NullLogger.Instance, CancellationToken.None);
+        await JobDispatchLogic.SweepOneAsync(job, jobs, rollup, NullLogger.Instance, CancellationToken.None);
 
         jobs.StatusUpdates.Should().BeEmpty("a result arriving mid-sweep must not be clobbered");
+        rollup.RolledUpJobIds.Should().BeEmpty();
     }
 }

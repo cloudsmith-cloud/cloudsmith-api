@@ -16,18 +16,21 @@ public sealed class RelayJobFrameHandler
     private readonly IJobService _jobs;
     private readonly IJobDirectory _directory;
     private readonly IJobAuditWriter _audit;
+    private readonly IBatchRollupService _batchRollup;
     private readonly ILogger<RelayJobFrameHandler> _logger;
 
     public RelayJobFrameHandler(
         IJobService jobs,
         IJobDirectory directory,
         IJobAuditWriter audit,
+        IBatchRollupService batchRollup,
         ILogger<RelayJobFrameHandler> logger)
     {
-        _jobs      = jobs;
-        _directory = directory;
-        _audit     = audit;
-        _logger    = logger;
+        _jobs        = jobs;
+        _directory   = directory;
+        _audit       = audit;
+        _batchRollup = batchRollup;
+        _logger      = logger;
     }
 
     /// <summary>
@@ -109,6 +112,10 @@ public sealed class RelayJobFrameHandler
             "Relay {RelayId}: job.result applied for {JobId} — {Outcome} (exit {ExitCode})",
             relayId, result.JobId, result.Succeeded ? JobStatuses.Succeeded : JobStatuses.Failed, result.ExitCode);
 
+        // AB#4843 — item completion is wired to job.result arrival: roll the terminal
+        // transition up into the containing batch, if any.
+        await _batchRollup.OnJobTerminalAsync(result.JobId, ct);
+
         var orgId = await _directory.GetOrgIdAsync(result.JobId, ct);
         if (orgId is null)
         {
@@ -146,6 +153,9 @@ public sealed class RelayJobFrameHandler
                 errorMessage: ack.Detail ?? "Relay rejected the dispatch.",
                 ct: ct);
         }
+
+        // Rejected acks are terminal (failed) — roll up into the containing batch.
+        await _batchRollup.OnJobTerminalAsync(ack.JobId, ct);
 
         _logger.LogWarning(
             "Relay {RelayId}: job.ack rejected for {JobId} — failed (detail: {Detail})",
