@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/orgs/cloudsmith-cloud/discussions
+    about: For questions that aren't a bug, feature request, or task, use Discussions instead.

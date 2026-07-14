@@ -1,0 +1,18 @@
+name: Task
+description: Internal chore or work unit (not a bug or feature request)
+title: "[Task]: "
+labels:
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For internal chores/work units. Set the issue's **Type** to `Task` if you have
+        permission. Tasks are usually ADO-authored and not routinely projected to
+        GitHub — see docs/standards/work-item-sync.md.
+  - type: textarea
+    id: description
+    attributes:
+      label: What needs to be done?
+    validations:
+      required: true

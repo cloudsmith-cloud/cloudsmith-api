@@ -1,0 +1,58 @@
+name: ADO sync (Flow 1 intake)
+
+# Mirrors native Bug/Feature GitHub issues up into Azure DevOps for rollup/reporting, using
+# the official Microsoft-documented GitHub Action (listed at
+# https://learn.microsoft.com/azure/devops/cross-service/github-integration#integrate-azure-boards-with-github)
+# instead of a hand-rolled script. GitHub stays the master record — see
+# docs/standards/work-item-sync.md (Flow 1) and docs/standards/github-issues.md.
+#
+# The REVERSE direction (AB# mention -> ADO link/state-transition, e.g. "Fixes AB#123" in a
+# PR) is handled by the native "Azure Boards" GitHub Marketplace app + the ADO project's
+# GitHub connection (Project Settings -> GitHub connections) — install/connect that once per
+# repo; it needs no workflow file and no custom Azure infrastructure. This workflow only
+# covers new-issue -> new-work-item creation, which the Boards app does not do on its own.
+#
+# Required repo secrets (sourced from kv-hcs-vault-01, never committed):
+#   ADO_PAT      - Azure DevOps PAT with Work Items (Read & Write) scope
+#   ADO_ORG      - ADO org name only, e.g. hybridcloudsolutions (not the full URL)
+#   ADO_PROJECT  - the ADO project this repo's work items land in (registry.yaml ado_project)
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened]
+
+permissions:
+  issues: write
+
+jobs:
+  mirror-to-ado:
+    # Only native Bug/Feature issue types are mirrored (Flow 1). Task and unlabeled issues
+    # are left alone — see the type table in docs/standards/github-issues.md. Feature issues
+    # land as a candidate work item; promotion to a roadmap-tracked Feature (Delivery Stage:
+    # Approved) is a human decision, not automated here (see work-item-sync.md Flow 2).
+    if: github.event.issue.type == null || github.event.issue.type.name == 'Bug' || github.event.issue.type.name == 'Feature'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine ADO work item type
+        id: type
+        run: |
+          case "${{ github.event.issue.type.name }}" in
+            Bug) echo "ado_wit=Bug" >> "$GITHUB_OUTPUT" ;;
+            Feature) echo "ado_wit=Feature" >> "$GITHUB_OUTPUT" ;;
+            *) echo "ado_wit=User Story" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # Pinned to the v2.5 release commit, not @master (mutable ref) — this action receives
+      # ADO_PAT and github_token secrets, so it must not silently pick up unreviewed changes.
+      # Re-pin deliberately (and re-review the diff) when bumping to a newer release.
+      - uses: danhellem/github-actions-issue-to-work-item@8d0ead9b49a65aa66dac6949b1ff149d7ef8b4de # v2.5
+        env:
+          ado_token: "${{ secrets.ADO_PAT }}"
+          ado_organization: "${{ secrets.ADO_ORG }}"
+          ado_project: "${{ secrets.ADO_PROJECT }}"
+          ado_wit: "${{ steps.type.outputs.ado_wit }}"
+          ado_new_state: "New"
+          ado_close_state: "Closed"
+          ado_bypassrules: "true"
+          github_token: "${{ github.token }}"
+          log_level: "100"

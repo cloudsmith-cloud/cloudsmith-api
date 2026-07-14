@@ -1,0 +1,32 @@
+name: Feature request
+description: Request a new capability or roadmap item
+title: "[Feature]: "
+labels:
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. After you submit this, set the issue's **Type** to
+        `Feature` if you have permission. Approved features become the roadmap — see
+        docs/standards/github-issues.md and docs/standards/work-item-sync.md (Flow 2)
+        for how approval and the `roadmap` marker work. Note: once approved, the
+        roadmap item is authored in ADO and projected back here as a locked,
+        bot-managed issue (labels `roadmap` + `ado-managed`) — this original request
+        stays open as the discussion thread.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
